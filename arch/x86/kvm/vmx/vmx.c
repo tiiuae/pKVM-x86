@@ -8654,6 +8654,9 @@ static __init int hardware_setup(void)
 }
 
 static struct kvm_x86_init_ops vmx_init_ops __initdata = {
+#ifdef CONFIG_PKVM_INTEL
+	.pkvm_init = pkvm_init,
+#endif
 	.hardware_setup = hardware_setup,
 	.handle_intel_pt_intr = NULL,
 
