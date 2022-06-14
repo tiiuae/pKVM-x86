@@ -1245,6 +1245,7 @@ enum kvm_apicv_inhibit {
 };
 
 struct kvm_arch {
+	unsigned long vm_type;
 	unsigned long n_used_mmu_pages;
 	unsigned long n_requested_mmu_pages;
 	unsigned long n_max_mmu_pages;
@@ -1559,6 +1560,7 @@ struct kvm_x86_ops {
 	void (*hardware_unsetup)(void);
 	bool (*has_emulated_msr)(struct kvm *kvm, u32 index);
 	void (*vcpu_after_set_cpuid)(struct kvm_vcpu *vcpu);
+	bool (*is_vm_type_supported)(unsigned long vm_type);
 
 	unsigned int vm_size;
 	int (*vm_init)(struct kvm *kvm);
