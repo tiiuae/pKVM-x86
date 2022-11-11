@@ -111,6 +111,35 @@ PHDRS {
 	note PT_NOTE FLAGS(0);          /* ___ */
 }
 
+#ifdef CONFIG_PKVM_INTEL
+#include <asm/pkvm_image.h>
+
+#define PKVM_TEXT							\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_text_start = .;						\
+	*(PKVM_SECTION_NAME(.text))					\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_text_end = .;
+
+#define PKVM_BSS							\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_bss_start = .;						\
+	*(PKVM_SECTION_NAME(.bss))					\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_bss_end = .;
+
+#define PKVM_DATA							\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_data_start = .;						\
+	*(PKVM_SECTION_NAME(.data))					\
+	. = ALIGN(PAGE_SIZE);						\
+	__pkvm_data_end = .;
+#else
+#define PKVM_TEXT
+#define PKVM_BSS
+#define PKVM_DATA
+#endif
+
 SECTIONS
 {
 #ifdef CONFIG_X86_32
@@ -151,6 +180,7 @@ SECTIONS
 		*(.text..__x86.rethunk_safe)
 #endif
 		ALIGN_ENTRY_TEXT_END
+		PKVM_TEXT
 		*(.gnu.warning)
 
 	} :text = 0xcccccccc
@@ -175,6 +205,7 @@ SECTIONS
 		/* 32 bit has nosave before _edata */
 		NOSAVE_DATA
 #endif
+		PKVM_DATA
 
 		PAGE_ALIGNED_DATA(PAGE_SIZE)
 
@@ -404,6 +435,7 @@ SECTIONS
 		. = ALIGN(PAGE_SIZE);
 		*(BSS_MAIN)
 		BSS_DECRYPTED
+		PKVM_BSS
 		. = ALIGN(PAGE_SIZE);
 		__bss_stop = .;
 	}
