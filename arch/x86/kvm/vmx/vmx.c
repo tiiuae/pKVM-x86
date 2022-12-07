@@ -48,6 +48,7 @@
 #include <asm/mwait.h>
 #include <asm/spec-ctrl.h>
 #include <asm/vmx.h>
+#include <asm/kvm_pkvm.h>
 
 #include "capabilities.h"
 #include "cpuid.h"
@@ -7481,6 +7482,8 @@ static void vmx_vcpu_free(struct kvm_vcpu *vcpu)
 	free_vpid(vmx->vpid);
 	nested_vmx_free_vcpu(vcpu);
 	free_loaded_vmcs(vmx->loaded_vmcs);
+
+	pkvm_teardown_shadow_vcpu(vcpu);
 }
 
 static int vmx_vcpu_create(struct kvm_vcpu *vcpu)
@@ -7578,7 +7581,7 @@ static int vmx_vcpu_create(struct kvm_vcpu *vcpu)
 		WRITE_ONCE(to_kvm_vmx(vcpu->kvm)->pid_table[vcpu->vcpu_id],
 			   __pa(&vmx->pi_desc) | PID_TABLE_ENTRY_VALID);
 
-	return 0;
+	return pkvm_init_shadow_vcpu(vcpu);
 
 free_vmcs:
 	free_loaded_vmcs(vmx->loaded_vmcs);
@@ -7620,7 +7623,13 @@ static int vmx_vm_init(struct kvm *kvm)
 			break;
 		}
 	}
-	return 0;
+
+	return pkvm_init_shadow_vm(kvm);
+}
+
+static void vmx_vm_free(struct kvm *kvm)
+{
+	pkvm_teardown_shadow_vm(kvm);
 }
 
 static u8 vmx_get_mt_mask(struct kvm_vcpu *vcpu, gfn_t gfn, bool is_mmio)
@@ -8289,6 +8298,7 @@ static struct kvm_x86_ops vmx_x86_ops __initdata = {
 	.vm_size = sizeof(struct kvm_vmx),
 	.vm_init = vmx_vm_init,
 	.vm_destroy = vmx_vm_destroy,
+	.vm_free = vmx_vm_free,
 
 	.vcpu_precreate = vmx_vcpu_precreate,
 	.vcpu_create = vmx_vcpu_create,
