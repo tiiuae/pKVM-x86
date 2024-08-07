@@ -1684,8 +1684,11 @@ static int iotlb_lm_invalidate(struct pkvm_iommu *iommu, struct qi_desc *desc)
 
 		/* optimization: walk just the needed devices, not the entire bdf space */
 		list_for_each_entry(p, &iommu->ptdev_head, iommu_node)
-			if (p->did == did)
+			if (p->did == did) {
 				ret = sync_shadow_id(iommu, p->bdf, p->bdf + 1, did, NULL);
+				if (ret)
+					break;
+			}
 		break;
 	case DMA_TLB_PSI_FLUSH:
 		data.vaddr = addr & mask;
@@ -1695,8 +1698,11 @@ static int iotlb_lm_invalidate(struct pkvm_iommu *iommu, struct qi_desc *desc)
 
 		/* optimization: walk just the needed devices, not the entire bdf space */
 		list_for_each_entry(p, &iommu->ptdev_head, iommu_node)
-			if (p->did == did)
+			if (p->did == did) {
 				ret = sync_shadow_id(iommu, p->bdf, p->bdf + 1, did, &data);
+				if (ret)
+					break;
+			}
 		break;
 	default:
 		pkvm_err("pkvm: %s: iommu%d: invalid granularity %lld\n",
