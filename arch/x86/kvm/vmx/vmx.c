@@ -7596,7 +7596,7 @@ static bool vmx_is_vm_type_supported(unsigned long type)
 {
 #ifdef CONFIG_PKVM_INTEL
 	if (type == KVM_X86_PROTECTED_VM)
-		return true;
+		return enable_pkvm;
 #endif
 	return type == KVM_X86_DEFAULT_VM;
 }
@@ -8589,14 +8589,16 @@ static __init int hardware_setup(void)
 #endif
 
 #if IS_ENABLED(CONFIG_PKVM_INTEL)
-	if (!enable_ept || vmx_x86_ops.flush_remote_tlbs ||
-			vmx_x86_ops.flush_remote_tlbs_range) {
-		pr_err_ratelimited("kvm: EPT or flush_remote_tlbs ops not available to pKVM-IA\n");
-		return -EOPNOTSUPP;
+	if (enable_pkvm) {
+		if (!enable_ept || vmx_x86_ops.flush_remote_tlbs ||
+				vmx_x86_ops.flush_remote_tlbs_range) {
+			pr_err_ratelimited("kvm: EPT or flush_remote_tlbs ops not available to pKVM-IA\n");
+			return -EOPNOTSUPP;
+		}
+		vmx_x86_ops.flush_remote_tlbs = pkvm_tlb_remote_flush;
+		vmx_x86_ops.flush_remote_tlbs_range =
+				pkvm_tlb_remote_flush_with_range;
 	}
-	vmx_x86_ops.flush_remote_tlbs = pkvm_tlb_remote_flush;
-	vmx_x86_ops.flush_remote_tlbs_range =
-			pkvm_tlb_remote_flush_with_range;
 #endif
 
 	if (!cpu_has_vmx_ple()) {
