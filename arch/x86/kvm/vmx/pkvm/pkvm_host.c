@@ -886,8 +886,10 @@ static noinline int pkvm_host_run_vcpu(struct pkvm_host_vcpu *vcpu)
 		"movq %%rsp, %%rax\n"
 		"movq %2, %%rdx\n"
 		"vmwrite %%rax, %%rdx\n"
+		UNWIND_HINT_SAVE
 		"movq %3, %%rsp\n"
 		"pushq %%rax\n"
+		UNWIND_HINT_UNDEFINED
 		:
 		: "i"(GUEST_RFLAGS), "i"(GUEST_RIP), "i"(GUEST_RSP), "m"(host_rsp)
 		: "rax", "rdx", "memory");
@@ -907,6 +909,7 @@ static noinline int pkvm_host_run_vcpu(struct pkvm_host_vcpu *vcpu)
 			"movq %1, %%rdx\n"
 			"movq %%rdx, %0\n"
 			"vmentry_point:\n"
+			UNWIND_HINT_RESTORE
 			: "=m"(ret) : "i"(-EINVAL) : "rdx", "memory");
 
 	return ret;
