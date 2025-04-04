@@ -38,6 +38,8 @@ struct pkvm_ve_info {
 	u16 eptp_index;
 };
 
+#define EPT_VIOLATION_VE_VALID (0xffffffff)
+
 /*
  * A container for the vcpu state that hyp needs to maintain for protected VMs.
  */

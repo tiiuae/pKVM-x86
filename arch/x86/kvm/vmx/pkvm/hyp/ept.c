@@ -25,6 +25,7 @@
 #include "debug.h"
 #include "ptdev.h"
 #include "io_emulate.h"
+#include "ve_emulation.h"
 
 static struct hyp_pool host_ept_pool;
 static struct pkvm_pgtable host_ept;
@@ -981,6 +982,11 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 	u64 gprot, rsvd_chk_gprot;
 
 	pkvm_spin_lock(&vm->lock);
+
+	if (!pkvm_handle_ve_emulation(shadow_vcpu, l2_gpa, exit_quali)) {
+		ret = PKVM_INJECT_VE;
+		goto out;
+	}
 
 	pkvm_pgtable_lookup(vept, l2_gpa, &phys, &gprot, &level);
 	if (phys == INVALID_ADDR)

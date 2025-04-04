@@ -13,6 +13,7 @@
 #include "ept.h"
 #include "debug.h"
 #include "mem_protect.h"
+#include "ve_emulation.h"
 
 /*
  * Not support shadow vmcs & vmfunc;
@@ -562,8 +563,10 @@ static u64 emulate_field_for_vmcs02(struct vcpu_vmx *vmx, u16 field, u64 virt_va
 		break;
 	case SECONDARY_VM_EXEC_CONTROL:
 		val &= ~NESTED_UNSUPPORTED_2NDEXEC;
-		/* Enable the #VE, but only protected VM will use it. */
-		val |= SECONDARY_EXEC_EPT_VIOLATION_VE;
+		if (vmx_has_ept_violation_ve()) {
+			/* Enable the #VE, if available, but only protected VM will use it. */
+			val |= SECONDARY_EXEC_EPT_VIOLATION_VE;
+		}
 		break;
 	}
 	return val;
@@ -870,7 +873,10 @@ int handle_vmptrld(struct kvm_vcpu *vcpu)
 						 */
 						if (shadow_vcpu_is_protected(shadow_vcpu)) {
 							memset(&shadow_vcpu->ve_info, 0, sizeof(shadow_vcpu->ve_info));
-							vmcs_write64(VE_INFORMATION_ADDRESS, __pkvm_pa(&shadow_vcpu->ve_info));
+							if (vmx_has_ept_violation_ve()) {
+								vmcs_write64(VE_INFORMATION_ADDRESS,
+									     __pkvm_pa(&shadow_vcpu->ve_info));
+							}
 						}
 
 						shadow_vcpu->last_cpu = vcpu->cpu;
@@ -1286,6 +1292,12 @@ static bool nested_handle_ept_violation(struct shadow_vcpu_state *shadow_vcpu,
 		 */
 		if (vmx_has_vmwrite_any_field())
 			vmcs_write32(VM_EXIT_REASON, EXIT_REASON_EPT_MISCONFIG);
+		break;
+	}
+	case PKVM_INJECT_VE: {
+		if (!pkvm_inject_ve(shadow_vcpu, exit_quali)) {
+			handled = true;
+		}
 		break;
 	}
 	case PKVM_HANDLED:

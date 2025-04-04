@@ -71,4 +71,9 @@ static inline bool gpa_range_has_pvmfw(struct pkvm_shadow_vm *vm, u64 gpa_start,
 	return gpa_end > vm->pvmfw_load_addr && gpa_start < pvmfw_load_end;
 }
 
+static inline bool shadow_vcpu_is_ve_valid(struct shadow_vcpu_state *shadow_vcpu)
+{
+	return shadow_vcpu->ve_info.valid == EPT_VIOLATION_VE_VALID;
+}
+
 #endif
