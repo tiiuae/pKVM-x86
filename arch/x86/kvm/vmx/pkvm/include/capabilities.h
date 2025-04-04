@@ -82,4 +82,15 @@ static inline bool vmx_has_invvpid_global(void)
 	return vmx_vpid_capability_check(VMX_VPID_EXTENT_GLOBAL_CONTEXT_BIT);
 }
 
+static inline bool vmx_has_ept_violation_ve(void)
+{
+	return !!(PKVM_HYP->vmcs_config.cpu_based_2nd_exec_ctrl &
+						SECONDARY_EXEC_EPT_VIOLATION_VE);
+}
+
+static inline bool vmx_has_ept_violation_ve_emulation(void)
+{
+	return !vmx_has_ept_violation_ve() && IS_ENABLED(CONFIG_PKVM_INTEL_VE_EMULATION);
+}
+
 #endif

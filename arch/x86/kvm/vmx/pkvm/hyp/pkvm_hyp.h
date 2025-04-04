@@ -38,6 +38,8 @@ struct pkvm_ve_info {
 	u16 eptp_index;
 };
 
+#define EPT_VIOLATION_VE_VALID (0xffffffff)
+
 /*
  * A container for the vcpu state that hyp needs to maintain for protected VMs.
  */
@@ -185,6 +187,11 @@ extern struct pkvm_hyp *pkvm_hyp;
 static inline bool shadow_vcpu_is_protected(struct shadow_vcpu_state *shadow_vcpu)
 {
 	return shadow_vcpu->vm->vm_type == KVM_X86_PROTECTED_VM;
+}
+
+static inline bool shadow_vcpu_is_ve_valid(struct shadow_vcpu_state *shadow_vcpu)
+{
+	return shadow_vcpu->ve_info.valid == EPT_VIOLATION_VE_VALID;
 }
 
 #endif

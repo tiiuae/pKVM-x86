@@ -20,6 +20,7 @@ enum sept_handle_ret {
 	PKVM_NOT_HANDLED,
 	PKVM_HANDLED,
 	PKVM_INJECT_EPT_MISC,
+	PKVM_INJECT_VE,
 };
 
 void host_ept_lock(void);
