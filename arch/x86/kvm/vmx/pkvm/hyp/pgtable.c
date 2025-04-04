@@ -404,8 +404,9 @@ static int pgtable_lookup_cb(struct pkvm_pgtable *pgt,
 			data->vaddr & ~pgt_ops->pgt_level_page_mask(level);
 
 		data->phys = pgt_ops->pgt_entry_to_phys(&pte) + offset;
-		data->prot = pgt_ops->pgt_entry_to_prot(&pte);
 	}
+
+	data->prot = pgt_ops->pgt_entry_to_prot(&pte);
 
 	return PGTABLE_WALK_DONE;
 }
