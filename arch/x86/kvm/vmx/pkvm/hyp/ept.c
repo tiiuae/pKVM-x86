@@ -968,6 +968,20 @@ static bool allow_shadow_ept_mapping(struct pkvm_shadow_vm *vm,
 	return true;
 }
 
+static int pkvm_add_shadow_ept_mapping(struct pkvm_shadow_vm *vm,
+                                     u64 fault_gpa, unsigned long phys,
+                                     u64 prot, int level)
+{
+      unsigned long level_size = vm->sept_desc.sept.pgt_ops->pgt_level_to_size(level);
+      unsigned long gpa = ALIGN_DOWN(fault_gpa, level_size);
+      unsigned long hpa = ALIGN_DOWN(host_gpa2hpa(phys), level_size);
+
+      if (!allow_shadow_ept_mapping(vm, gpa, hpa, level_size))
+              return -1;
+
+      return pkvm_pgtable_map(&vm->sept_desc.sept, gpa, hpa, level_size, 0, prot, NULL);
+}
+
 enum sept_handle_ret
 pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_gpa, u64 exit_quali)
 {
@@ -980,6 +994,7 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 	unsigned long phys;
 	int level;
 	u64 gprot, rsvd_chk_gprot;
+	u64 prot;
 
 	pkvm_spin_lock(&vm->lock);
 
@@ -993,10 +1008,6 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 		/* Geust EPT not valid, back to kvm-high */
 		goto out;
 
-	if (is_access_violation(gprot, exit_quali))
-		/* Guest EPT error, refuse to handle in shadow ept */
-		goto out;
-
 	rsvd_chk_gprot = gprot;
 	/* is_rsvd_spte() need based on PAGE_SIZE bit */
 	if (level != PG_LEVEL_4K)
@@ -1004,20 +1015,21 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 
 	if (is_rsvd_spte(&ept_zero_check, rsvd_chk_gprot, level)) {
 		ret = PKVM_INJECT_EPT_MISC;
-	} else {
-		unsigned long level_size = pgt_ops->pgt_level_to_size(level);
-		unsigned long gpa = ALIGN_DOWN(l2_gpa, level_size);
-		unsigned long hpa = ALIGN_DOWN(host_gpa2hpa(phys), level_size);
-		/*
-		 * Still set SUPPRESS_VE bit here as some mapping may still
-		 * cause EPT_VIOLATION and we want these EPT_VIOLATION to cause
-		 * vmexit.
-		 */
-		u64 prot = (gprot & EPT_PROT_MASK) | EPT_PROT_DEF;
+		goto out;
+	}
 
-		if (allow_shadow_ept_mapping(vm, gpa, hpa, level_size) &&
-		    !pkvm_pgtable_map(sept, gpa, hpa, level_size, 0, prot, NULL))
-			ret = PKVM_HANDLED;
+	if (is_access_violation(gprot, exit_quali))
+		/* Guest EPT error, refuse to handle in shadow ept */
+		goto out;
+
+	/*
+	 * Still set SUPPRESS_VE bit here as some mapping may still
+	 * cause EPT_VIOLATION and we want these EPT_VIOLATION to cause
+	 * vmexit.
+	 */
+	prot = (gprot & EPT_PROT_MASK) | EPT_PROT_DEF;
+	if (!pkvm_add_shadow_ept_mapping(vm, l2_gpa, phys, prot, level)) {
+		ret = PKVM_HANDLED;
 	}
 out:
 	pkvm_spin_unlock(&vm->lock);
