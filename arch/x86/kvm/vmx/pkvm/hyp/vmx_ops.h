@@ -58,6 +58,45 @@ static __always_inline unsigned long vmcs_readl(unsigned long field)
 	return __vmcs_readl(field);
 }
 
+static __always_inline unsigned long try_vmcs_readl(unsigned long field,
+                                                    int *ret)
+{
+	unsigned long value = 0;
+
+	vmcs_checkl(field);
+
+#ifdef CONFIG_CC_HAS_ASM_GOTO_OUTPUT
+	asm_goto_output("1: vmread %[field], %[output]\n\t"
+			"jna %l[do_fail]\n\t"
+			: [output] "=r" (value)
+			: [field] "r" (field)
+			: "cc"
+			: do_fail);
+
+	*ret = 0;
+	return value;
+
+do_fail:
+	*ret = -ENOTSUPP;
+	return 0;
+#else
+	asm volatile("movl $0, %[status]\n\t" /* clear status */
+		     "1: vmread %[field], %[output]\n\t"
+		     ".byte 0x3e\n\t" /* branch taken hint */
+		     "ja 3f\n\t"
+
+		     /* VMREAD failed/faulted. Set @error to @status. */
+		     "2: movl %[error], %[status]\n\t"
+		     "3:\n\t"
+		     /* VMREAD faults jump to label "2" for error handling */
+		     _ASM_EXTABLE(1b, 2b)
+		     : ASM_CALL_CONSTRAINT, [output] "=&r"(value), [status] "=m" (*ret)
+		     : [field] "r"(field), [error] "i"(-ENOTSUPP)
+		     : "cc");
+	return value;
+#endif
+}
+
 static inline void pkvm_vmwrite_error(unsigned long field, unsigned long value)
 {
 	pkvm_err("pkvm: vmwrite failed: field=%lx val=%lx err=%d\n",
