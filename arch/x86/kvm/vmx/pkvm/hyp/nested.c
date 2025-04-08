@@ -188,6 +188,14 @@ static bool has_vmcs_field(u16 encoding)
 		return msrs->exit_ctls_high & VM_ENTRY_LOAD_IA32_PERF_GLOBAL_CTRL;
 	case EPTP_LIST_ADDRESS:
 		return msrs->vmfunc_controls & VMX_VMFUNC_EPTP_SWITCHING;
+	case EXIT_IO_RCX:
+	case EXIT_IO_RSI:
+	case EXIT_IO_RDI:
+	case EXIT_IO_RIP: {
+		int ret;
+		(void) try_vmcs_readl(encoding, &ret);
+		return !ret;
+	}
 	default:
 		return true;
 	}
