@@ -1463,6 +1463,8 @@ int nested_vmexit(struct kvm_vcpu *vcpu, bool *skip_instruction)
 	if (!vmcs12->launch_state)
 		vmcs12->launch_state = 1;
 
+	copy_shadow_fields_vmcs02_to_vmcs12(vmx, vmcs12);
+
 	/* switch to vmcs01 */
 	vmcs_clear_track(vmx, vmcs02);
 	set_shadow_indicator(vmcs02);
