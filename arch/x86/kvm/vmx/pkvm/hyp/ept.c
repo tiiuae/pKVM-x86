@@ -655,7 +655,6 @@ static int pkvm_pgstate_pgt_free_leaf(struct pkvm_pgtable *pgt, unsigned long va
 		pgt->mm_ops->put_page(ptep);
 		flush_data->flushtlb |= true;
 	} else {
-#ifndef CONFIG_PKVM_INTEL_PROTECTED_VM_COREDUMP
 		struct mem_range range;
 		/*
 		 * before returning to host, the memory page previously owned by
@@ -663,7 +662,6 @@ static int pkvm_pgstate_pgt_free_leaf(struct pkvm_pgtable *pgt, unsigned long va
 		 */
 		if (find_mem_range(phys, &range))
 			memset(pgt->mm_ops->phys_to_virt(phys), 0, min(size, range.end - phys));
-#endif
 		pgt->mm_ops->get_page(ptep);
 		ret = __pkvm_host_undonate_guest(phys, pgt, vaddr, size);
 		pgt->mm_ops->put_page(ptep);
