@@ -528,6 +528,13 @@ static char __log_buf[__LOG_BUF_LEN] __aligned(LOG_ALIGN);
 static char *log_buf = __log_buf;
 static u32 log_buf_len = __LOG_BUF_LEN;
 
+/* Tiny ram log */
+#ifdef CONFIG_DEBUG_KERNEL
+#include <linux/ramlog.h>
+char __rlog[RAMLOGSZ];
+int __rp = 0;
+#endif
+
 /*
  * Define the average message size. This only affects the number of
  * descriptors that will be available. Underestimating is better than
