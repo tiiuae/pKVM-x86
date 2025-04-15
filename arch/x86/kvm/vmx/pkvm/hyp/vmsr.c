@@ -24,6 +24,10 @@ static unsigned int emulated_wo_guest_msrs[] = {
 	(APIC_BASE_MSR + (APIC_ID >> 4)),
 };
 
+static unsigned int emulated_rw_guest_msrs[] = {
+       MSR_IA32_UMWAIT_CONTROL,
+};
+
 static void enable_msr_interception(u8 *bitmap, unsigned int msr_arg, unsigned int mode)
 {
 	unsigned int read_offset = 0U;
@@ -59,6 +63,7 @@ static void enable_msr_interception(u8 *bitmap, unsigned int msr_arg, unsigned i
 int handle_read_msr(struct kvm_vcpu *vcpu)
 {
 	unsigned long msr = vcpu->arch.regs[VCPU_REGS_RCX];
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	int ret = 0;
 	u32 low = 0, high = 0;
 	u64 val;
@@ -71,6 +76,19 @@ int handle_read_msr(struct kvm_vcpu *vcpu)
 			high = (u32)(val >> 32);
 		}
 	}
+
+	switch (msr) {
+	case MSR_IA32_UMWAIT_CONTROL:
+		if (!vmx_has_waitpkg(vmx)) {
+			ret = 1;
+			break;
+		}
+		pkvm_rdmsr(msr, low, high);
+		break;
+	default:
+		break;
+	}
+
 	pkvm_dbg("%s: CPU%d Value of msr 0x%lx: low=0x%x, high=0x%x\n", __func__, vcpu->cpu, msr, low, high);
 
 	vcpu->arch.regs[VCPU_REGS_RAX] = low;
@@ -82,6 +100,7 @@ int handle_read_msr(struct kvm_vcpu *vcpu)
 int handle_write_msr(struct kvm_vcpu *vcpu)
 {
 	unsigned long msr = vcpu->arch.regs[VCPU_REGS_RCX];
+	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	u32 low, high;
 	u64 val;
 	int ret = 0;
@@ -96,6 +115,13 @@ int handle_write_msr(struct kvm_vcpu *vcpu)
 		break;
 	case APIC_BASE_MSR ... APIC_BASE_MSR + 0xff:
 		ret = pkvm_x2apic_msr_write(vcpu, msr, val);
+		break;
+	case MSR_IA32_UMWAIT_CONTROL:
+		if (!vmx_has_waitpkg(vmx)) {
+			ret = 1;
+			break;
+		}
+		pkvm_wrmsrl(msr, val);
 		break;
 	default:
 		break;
@@ -114,4 +140,7 @@ void init_msr_emulation(struct vcpu_vmx *vmx)
 
 	for (i = 0; i < ARRAY_SIZE(emulated_wo_guest_msrs); i++)
 		enable_msr_interception(bitmap, emulated_wo_guest_msrs[i], INTERCEPT_WRITE);
+
+	for (i = 0; i < ARRAY_SIZE(emulated_rw_guest_msrs); i++)
+		enable_msr_interception(bitmap, emulated_rw_guest_msrs[i], INTERCEPT_READ_WRITE);
 }
