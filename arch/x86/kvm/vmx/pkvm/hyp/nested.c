@@ -6,6 +6,7 @@
 #include <pkvm.h>
 #include <asm/kvm_pkvm.h>
 #include <capabilities.h>
+#include <vmx/vmx_debug.h>
 #include "pkvm_hyp.h"
 #include "nested.h"
 #include "cpu.h"
@@ -1095,6 +1096,7 @@ int handle_vmlaunch(struct kvm_vcpu *vcpu)
 	if (check_vmx_permission(vcpu))
 		nested_vmx_run(vcpu, true);
 
+	debug_validate_vmcs();
 	return 0;
 }
 
