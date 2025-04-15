@@ -185,3 +185,75 @@ char *debug_dump_vmcs(void)
 	return s;
 }
 
+static u32 vmcs_check_32bit_zero_bits(u32 vmcs_val, u64 msr_val)
+{
+	return ~vmcs_val & msr_val;
+}
+
+static u32 vmcs_check_32bit_one_bits(u32 vmcs_val, u64 msr_val)
+{
+	return vmcs_val & ~(msr_val >> 32);
+}
+
+static int do_vmcs_check_32bit_register(char *vmcs_name, u32 vmcs,
+					 char *msr_name, u32 msr)
+{
+	int ret = 0;
+
+	u32 vmcs_val = debug_read_vmcs(vmcs);
+	u64 msr_val = debug_read_msr(msr);
+
+	u32 zb = vmcs_check_32bit_zero_bits(vmcs_val, msr_val);
+	u32 ob = vmcs_check_32bit_one_bits(vmcs_val, msr_val);
+
+	if (zb) {
+		pr_err("%s contains invalid zero bits: 0x%x\n", vmcs_name, zb);
+		ret = -1;
+	}
+	if (ob) {
+		pr_err("%s contains invalid one bits: 0x%x\n", vmcs_name, ob);
+		ret = -1;
+	}
+
+	if (ret) {
+		pr_err("%s\t0x%016x", vmcs_name, vmcs_val);
+		pr_err("%s\t0x%016llx", msr_name, msr_val);
+	}
+
+	return ret;
+}
+
+#define vmcs_check_32bit_register(_vmcs, _msr)			\
+	do {							\
+		do_vmcs_check_32bit_register(#_vmcs, _vmcs,	\
+					     #_msr, _msr);	\
+	} while (0)
+
+void debug_validate_vmcs_registers(void)
+{
+	if (!msr_true_ctls_avail()) {
+		vmcs_check_32bit_register(PIN_BASED_VM_EXEC_CONTROL,
+					  MSR_IA32_VMX_PINBASED_CTLS);
+		vmcs_check_32bit_register(CPU_BASED_VM_EXEC_CONTROL,
+					  MSR_IA32_VMX_PROCBASED_CTLS);
+		vmcs_check_32bit_register(VM_ENTRY_CONTROLS,
+					  MSR_IA32_VMX_ENTRY_CTLS);
+		vmcs_check_32bit_register(VM_EXIT_CONTROLS,
+					  MSR_IA32_VMX_EXIT_CTLS);
+	} else {
+		vmcs_check_32bit_register(PIN_BASED_VM_EXEC_CONTROL,
+					  MSR_IA32_VMX_TRUE_PINBASED_CTLS);
+		vmcs_check_32bit_register(CPU_BASED_VM_EXEC_CONTROL,
+					  MSR_IA32_VMX_TRUE_PROCBASED_CTLS);
+		vmcs_check_32bit_register(VM_ENTRY_CONTROLS,
+					  MSR_IA32_VMX_TRUE_ENTRY_CTLS);
+		vmcs_check_32bit_register(VM_EXIT_CONTROLS,
+					  MSR_IA32_VMX_TRUE_EXIT_CTLS);
+	}
+
+	if (vmcs_secondary_exec_ctl_enabled()) {
+		vmcs_check_32bit_register(SECONDARY_VM_EXEC_CONTROL,
+					  MSR_IA32_VMX_PROCBASED_CTLS2);
+	}
+}
+
