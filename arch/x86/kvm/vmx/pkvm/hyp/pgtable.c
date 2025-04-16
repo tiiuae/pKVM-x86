@@ -668,6 +668,9 @@ void pkvm_pgtable_lookup(struct pkvm_pgtable *pgt, unsigned long vaddr,
 {
 	struct pkvm_pgtable_lookup_data data = {
 		.vaddr = vaddr,
+		.phys = ~0,
+		.prot = 0,
+		.level = 0,
 	};
 	struct pkvm_pgtable_walker walker = {
 		.cb = pgtable_lookup_cb,
