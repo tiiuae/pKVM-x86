@@ -538,7 +538,7 @@ int pgtable_walk(struct pkvm_pgtable *pgt, unsigned long vaddr,
 	int ret;
 
 	if (!size || data.vaddr == data.vaddr_end)
-		return 0;
+		return -EINVAL;
 
 	ret = _pgtable_walk(&data, mm_ops->phys_to_virt(pgt->root_pa), pgt->level);
 
