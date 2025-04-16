@@ -84,6 +84,7 @@
 #include <asm/intel_pt.h>
 #include <asm/emulate_prefix.h>
 #include <asm/sgx.h>
+#include <asm/pkvm.h>
 #include <clocksource/hyperv_timer.h>
 
 #define CREATE_TRACE_POINTS
@@ -8901,6 +8902,57 @@ EXPORT_SYMBOL_GPL(x86_decode_emulated_instruction);
 int x86_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 			    int emulation_type, void *insn, int insn_len)
 {
+	int ret;
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	/*
+	 * This function can fault within the hypervisor, so for time
+	 * being lock the kernel text section. In the long run pre-
+	 * allocate all the vm memory from a flat pool to prevent any
+	 * faulting - in minimum, anything related to the chipset regs
+	 * or the smm.
+	 */
+	local_irq_disable();
+	ret = kvm_hypercall5(PKVM_HC_EMULATE_INSN, (unsigned long)vcpu,
+			     (unsigned long)cr2_or_gpa,
+			     (unsigned long)emulation_type,
+			     (unsigned long)insn,
+			     (unsigned long)insn_len);
+	local_irq_enable();
+#else
+	ret = __x86_emulate_instruction(vcpu, cr2_or_gpa, emulation_type,
+					insn, insn_len);
+#endif
+	return ret;
+}
+
+/*
+ * PKVM CONFIG_VMXROOT_MMIO notes:
+ *
+ * The host doesn't know the insn or the insn length, it just asks to
+ * execute an instruction at the failing address which only the hyp can
+ * access via the hypervisor linear mapping.
+ *
+ * At the time of writing, the hypervisor has all guests and the host
+ * mapped inside its linear page mapping, so all operations need to be
+ * checked manually without depending on the mmu before acting on them.
+ *
+ * To do this, the guest reads and writes are pushed to two functions,
+ * __hyp_{read,write}_guest_page. These functions do not allow operation
+ * outside of the guest address space. The resulting hva we act on is
+ * double checked to reside in the guest or inside a share. This check
+ * is vital at the moment as the memory slot is a host controllable
+ * construct.
+ *
+ * The processor register states for the instruction emulation come via
+ * vmcs guest state area that resides in the hyp mode 02 structure, 12
+ * is emulated and syncs via sync_vmcs12_dirty_fields_to_vmcs02(). The
+ * logic is unchanged from the default #ve model.
+ *
+ * TODO: emulate_ctxt below
+ */
+int __x86_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
+			    int emulation_type, void *insn, int insn_len)
+{
 	int r;
 	struct x86_emulate_ctxt *ctxt = vcpu->arch.emulate_ctxt;
 	bool writeback = true;
@@ -10130,8 +10182,23 @@ static void kvm_inject_exception(struct kvm_vcpu *vcpu)
  * ordering between that side effect, the instruction completing, _and_ the
  * delivery of the asynchronous event.
  */
-static int kvm_check_and_inject_events(struct kvm_vcpu *vcpu,
-				       bool *req_immediate_exit)
+int kvm_check_and_inject_events(struct kvm_vcpu *vcpu,
+                                bool *req_immediate_exit)
+{
+	int ret;
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	ret = kvm_hypercall2(PKVM_HC_INJECT_EVENTS,
+			    (unsigned long)vcpu,
+			    (unsigned long)req_immediate_exit);
+#else
+	ret = __kvm_check_and_inject_events(vcpu, req_immediate_exit);
+#endif
+	return ret;
+}
+
+int __kvm_check_and_inject_events(struct kvm_vcpu *vcpu,
+				  bool *req_immediate_exit)
+
 {
 	bool can_inject;
 	int r;
@@ -12733,9 +12800,18 @@ int kvm_arch_prepare_memory_region(struct kvm *kvm,
 		return -EINVAL;
 
 	if (change == KVM_MR_CREATE || change == KVM_MR_MOVE) {
-		if ((new->base_gfn + new->npages - 1) > kvm_mmu_max_gfn())
-			return -EINVAL;
+		u64 ep, mp;
 
+		if (kvm->pkvm.shadow_vm_handle == PKVM_HOST_HANDLE)
+			goto cont;
+
+		ep = new->base_gfn + new->npages - 1;
+		mp = kvm_mmu_max_gfn();
+		if (ep > mp) {
+			kvm_err("kvm: invalid slot 0x%llx > 0x%llx\n", ep, mp);
+			return -EINVAL;
+		}
+cont:
 		return kvm_alloc_memslot_metadata(kvm, new);
 	}
 

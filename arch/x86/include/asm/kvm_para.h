@@ -105,6 +105,22 @@ static inline long kvm_hypercall4(unsigned int nr, unsigned long p1,
 	return ret;
 }
 
+static inline long kvm_hypercall5(unsigned int nr, unsigned long p1,
+				  unsigned long p2, unsigned long p3,
+				  unsigned long p4, unsigned long p5)
+{
+	long ret;
+
+	if (cpu_feature_enabled(X86_FEATURE_TDX_GUEST))
+		return -EINVAL;
+
+	asm volatile(KVM_HYPERCALL
+		     : "=a"(ret)
+		     : "a"(nr), "b"(p1), "c"(p2), "d"(p3), "S"(p4), "D"(p5)
+		     : "memory");
+	return ret;
+}
+
 static inline long kvm_sev_hypercall3(unsigned int nr, unsigned long p1,
 				      unsigned long p2, unsigned long p3)
 {

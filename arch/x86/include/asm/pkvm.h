@@ -10,6 +10,8 @@
 #include <asm/coco.h>
 #include <asm/virt_exception.h>
 
+#define PKVM_HOST_HANDLE	INT_MAX
+
 /* PKVM Hypercalls */
 #define PKVM_HC_INIT_FINALISE		1
 #define PKVM_HC_INIT_SHADOW_VM		2
@@ -21,7 +23,10 @@
 #define PKVM_HC_TLB_REMOTE_FLUSH_RANGE	8
 #define PKVM_HC_SET_MMIO_VE		9
 #define PKVM_HC_ADD_PTDEV		10
+#define PKVM_HC_EMULATE_INSN				11
+#define PKVM_HC_INJECT_EVENTS				12
 #define PKVM_HC_PREPARE_VM_COREDUMP	13
+
 /*
  * 15bits for PASID, DO NOT change it, based on it,
  * the size of PASID DIR table can kept as one page

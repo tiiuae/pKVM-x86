@@ -1165,9 +1165,10 @@ int pkvm_init_shadow_vcpu(struct kvm_vcpu *vcpu)
 	if (!shadow_addr)
 		return -ENOMEM;
 
-	shadow_vcpu_handle = kvm_hypercall4(PKVM_HC_INIT_SHADOW_VCPU,
+	shadow_vcpu_handle = kvm_hypercall5(PKVM_HC_INIT_SHADOW_VCPU,
 					    pkvm->shadow_vm_handle, (unsigned long)vmx,
-					    (unsigned long)__pa(shadow_addr), shadow_sz);
+					    (unsigned long)__pa(shadow_addr), shadow_sz,
+					    (unsigned long)vcpu);
 	if (shadow_vcpu_handle < 0)
 		goto free_page;
 
@@ -1230,6 +1231,9 @@ int pkvm_tlb_remote_flush(struct kvm *kvm)
 
 int pkvm_set_mmio_ve(struct kvm_vcpu *vcpu, unsigned long gfn)
 {
+	if (IS_ENABLED(CONFIG_PKVM_INTEL_VMXROOT_MMIO))
+	    return 0;
+
 	if (vcpu->kvm->arch.vm_type == KVM_X86_PROTECTED_VM) {
 		kvm_hypercall1(PKVM_HC_SET_MMIO_VE, gfn);
 		return 1;

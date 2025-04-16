@@ -1004,6 +1004,10 @@ void kvm_put_kvm(struct kvm *kvm);
 bool file_is_kvm(struct file *file);
 void kvm_put_kvm_no_destroy(struct kvm *kvm);
 
+/* In order to run host with valid slot data, too */
+void kvm_create_memslot(struct kvm *kvm,
+                        struct kvm_memory_slot *new);
+
 static inline struct kvm_memslots *__kvm_memslots(struct kvm *kvm, int as_id)
 {
 	as_id = array_index_nospec(as_id, KVM_ADDRESS_SPACE_NUM);
