@@ -17,11 +17,10 @@ struct pkvm_hyp *pkvm_hyp;
 #define MAX_SHADOW_VMS	(PKVM_MAX_NORMAL_VM_NUM + PKVM_MAX_PROTECTED_VM_NUM)
 #define HANDLE_OFFSET 1
 
-#define to_shadow_vm_handle(vcpu_handle)	((s64)(vcpu_handle) >> SHADOW_VM_HANDLE_SHIFT)
-#define to_shadow_vcpu_idx(vcpu_handle)		((s64)(vcpu_handle) & SHADOW_VCPU_INDEX_MASK)
-
 static DECLARE_BITMAP(shadow_vms_bitmap, MAX_SHADOW_VMS);
 static pkvm_spinlock_t shadow_vms_lock = __PKVM_SPINLOCK_UNLOCKED;
+bool pkvm_host_init_complete = false;
+
 struct shadow_vm_ref {
 	atomic_t refcount;
 	struct pkvm_shadow_vm *vm;
@@ -32,7 +31,7 @@ static struct shadow_vm_ref shadow_vms_ref[MAX_SHADOW_VMS];
 	((struct shadow_vcpu_array *)((void *)(vm) + sizeof(struct pkvm_shadow_vm)))
 
 #define SHADOW_VCPU_HASH_BITS		10
-DEFINE_HASHTABLE(shadow_vcpu_table, SHADOW_VCPU_HASH_BITS);
+static DEFINE_HASHTABLE(shadow_vcpu_table, SHADOW_VCPU_HASH_BITS);
 static pkvm_spinlock_t shadow_vcpu_table_lock = __PKVM_SPINLOCK_UNLOCKED;
 
 static int allocate_shadow_vm_handle(struct pkvm_shadow_vm *vm)
@@ -94,14 +93,15 @@ out:
 }
 
 int __pkvm_init_shadow_vm(struct kvm_vcpu *hvcpu, unsigned long kvm_va,
-			  unsigned long shadow_pa,  size_t shadow_size)
+			  unsigned long shadow_pa, size_t shadow_size)
 {
 	typeof_member(struct kvm, arch.vm_type) vm_type;
 	unsigned long offset = offsetof(struct kvm, arch.vm_type);
 	unsigned long bytes = sizeof(vm_type);
 	struct pkvm_shadow_vm *vm;
 	struct x86_exception e;
-	int shadow_vm_handle;
+
+	pkvm_host_init_complete = true;
 
 	if (!PAGE_ALIGNED(shadow_pa) ||
 		!PAGE_ALIGNED(shadow_size) ||
@@ -130,17 +130,19 @@ int __pkvm_init_shadow_vm(struct kvm_vcpu *hvcpu, unsigned long kvm_va,
 	vm->pvmfw_load_addr = PVMFW_INVALID_LOAD_ADDR;
 	vm->finalized = !shadow_vm_is_protected(vm);
 
+	init_guest_smm_dma(vm);
+
 	if (pkvm_pgstate_pgt_init(vm))
 		goto undonate;
 
 	if (pkvm_shadow_ept_init(&vm->sept_desc))
 		goto deinit_pgstate_pgt;
 
-	shadow_vm_handle = allocate_shadow_vm_handle(vm);
-	if (shadow_vm_handle < 0)
+	vm->shadow_vm_handle = allocate_shadow_vm_handle(vm);
+	if (vm->shadow_vm_handle < 0)
 		goto deinit_shadow_ept;
 
-	return shadow_vm_handle;
+	return vm->shadow_vm_handle;
 
 deinit_shadow_ept:
 	pkvm_shadow_ept_deinit(&vm->sept_desc);
@@ -226,6 +228,10 @@ unsigned long __pkvm_teardown_shadow_vm(int shadow_vm_handle)
 	if (!vm)
 		return 0;
 
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	mmput(vm->mm);
+#endif
+
 	pkvm_shadow_ept_deinit(&vm->sept_desc);
 
 	pkvm_pgstate_pgt_deinit(vm);
@@ -254,18 +260,18 @@ struct pkvm_shadow_vm *get_shadow_vm(int shadow_vm_handle)
 
 struct pkvm_shadow_vm *get_shadow_vm_by_mm(struct mm_struct *mm)
 {
-       struct shadow_vm_ref *vm_ref = NULL;
-       u32 i = 0;
+	struct shadow_vm_ref *vm_ref = NULL;
+	u32 i = 0;
 
-       while (i < MAX_SHADOW_VMS) {
-               vm_ref = &shadow_vms_ref[i];
-               if (vm_ref && vm_ref->vm && vm_ref->vm->mm == mm)
-                       break;
-               i++;
-       }
-       if (i < (MAX_SHADOW_VMS - 1))
-               return atomic_inc_not_zero(&vm_ref->refcount) ? vm_ref->vm : NULL;
-       return NULL;
+	while (i < MAX_SHADOW_VMS) {
+		vm_ref = &shadow_vms_ref[i];
+		if (vm_ref && vm_ref->vm && vm_ref->vm->mm == mm)
+			break;
+		i++;
+	}
+	if (i < (MAX_SHADOW_VMS - 1))
+		return atomic_inc_not_zero(&vm_ref->refcount) ? vm_ref->vm : NULL;
+	return NULL;
 }
 
 void put_shadow_vm(int shadow_vm_handle)
@@ -413,6 +419,9 @@ static s64 attach_shadow_vcpu_to_vm(struct pkvm_shadow_vm *vm,
 	if (!shadow_vm_is_protected(vm))
 		shadow_vcpu->allowed_to_run = true;
 
+	pkvm_info("pkvm: attached shadow vcpu handle 0x%llx to vm 0x%x\n",
+		  shadow_vcpu->shadow_vcpu_handle, vm->shadow_vm_handle);
+
 	vcpu_ref = &SHADOW_VCPU_ARRAY(vm)->ref[vcpu_idx];
 	vcpu_ref->vcpu = shadow_vcpu;
 	vm->created_vcpus++;
@@ -461,7 +470,7 @@ detach_shadow_vcpu_from_vm(struct pkvm_shadow_vm *vm, s64 shadow_vcpu_handle)
 
 s64 __pkvm_init_shadow_vcpu(struct kvm_vcpu *hvcpu, int shadow_vm_handle,
 			    unsigned long vcpu_va, unsigned long shadow_pa,
-			    size_t shadow_size)
+			    size_t shadow_size, struct kvm_vcpu *gvcpu)
 {
 	struct pkvm_shadow_vm *vm;
 	struct shadow_vcpu_state *shadow_vcpu;
@@ -500,6 +509,8 @@ s64 __pkvm_init_shadow_vcpu(struct kvm_vcpu *hvcpu, int shadow_vm_handle,
 
 	if (shadow_vcpu_handle < 0)
 		goto undonate;
+
+	shadow_vcpu->gvcpu = gvcpu;
 
 	return shadow_vcpu_handle;
 undonate:

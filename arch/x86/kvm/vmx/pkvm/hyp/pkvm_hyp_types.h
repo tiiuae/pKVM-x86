@@ -8,6 +8,7 @@
 #include <asm/pkvm_spinlock.h>
 #include "pgtable.h"
 
+
 /*
  * Descriptor for shadow EPT
  */
@@ -44,6 +45,13 @@ struct pkvm_ve_info {
 };
 
 #define EPT_VIOLATION_VE_VALID (0xffffffff)
+
+#define PKVM_MAX_SHARES 32
+
+struct pkvm_share {
+	u64 gpa;
+	int size;
+};
 
 /*
  * A container for the vcpu state that hyp needs to maintain for protected VMs.
@@ -85,6 +93,13 @@ struct shadow_vcpu_state {
 
 	/* point to the kvm_vcpu associated with this shadow_vcpu */
 	struct kvm_vcpu *vcpu;
+
+	/* Point to the guest kvm_vcpu associated with this shadow_vcpu */
+	struct kvm_vcpu *gvcpu;
+
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	struct x86_emulate_ctxt ctxt;
+#endif
 } __aligned(PAGE_SIZE);
 
 /*
@@ -162,6 +177,9 @@ struct pkvm_shadow_vm {
 
 	/* The vm_type to indicate if this is a protected VM */
 	u8 vm_type;
+
+	/* Share tracking */
+	struct pkvm_share shares[PKVM_MAX_SHARES];
 
 	pkvm_spinlock_t lock;
 } __aligned(PAGE_SIZE);

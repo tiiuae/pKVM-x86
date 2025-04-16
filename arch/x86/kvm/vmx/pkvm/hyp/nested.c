@@ -32,6 +32,8 @@ static const unsigned int vmx_msrs[] = {
 	LIST_OF_VMX_MSRS
 };
 
+extern u64 host_eptp;
+
 bool is_vmx_msr(unsigned long msr)
 {
 	bool found = false;
@@ -447,16 +449,30 @@ static int validate_vmcs_revision_id(struct kvm_vcpu *vcpu, gpa_t vmpointer)
 	return (rev_id == vmx_basic_vmcs_revision_id(vmcs_config->basic));
 }
 
-static bool check_vmx_permission(struct kvm_vcpu *vcpu)
+static noinline bool check_vmx_permission(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
-	bool permit = true;
+	u64 cr4;
 
-	/*TODO: check more env (cr, cpl) and inject #UD/#GP */
+	/* FIXME: check more env (cr, cpl) and inject #UD/#GP */
+
 	if (!vmx->nested.vmxon)
-		permit = false;
+		return false;
 
-	return permit;
+	/* The host context must be static (vmcs01 + right ept).. */
+	if (vmcs_read64(EPT_POINTER) != host_eptp)
+		panic("%s: entering emulated call from unknown context?\n",
+			__func__);
+
+	/* And the virtualization must be enabled .. */
+	asm("mov %%cr4,%0" : "=r"(cr4));
+
+	if (!(cr4 & (1 << X86_CR4_VMXE_BIT))) {
+		BUG();
+		return false;
+	}
+
+	return true;
 }
 
 static void clear_shadow_indicator(struct vmcs *vmcs)
@@ -716,6 +732,7 @@ static void nested_vmx_run(struct kvm_vcpu *vcpu, bool launch)
 	struct shadow_vcpu_state *cur_shadow_vcpu = pkvm_hvcpu->current_shadow_vcpu;
 	struct vmcs *vmcs02 = (struct vmcs *)cur_shadow_vcpu->vmcs02;
 	struct vmcs12 *vmcs12 = (struct vmcs12 *)cur_shadow_vcpu->cached_vmcs12;
+	static int initp;
 
 	if (vmx->nested.current_vmptr == INVALID_GPA) {
 		nested_vmx_result(VMfailInvalid, 0);
@@ -745,6 +762,11 @@ static void nested_vmx_run(struct kvm_vcpu *vcpu, bool launch)
 
 		update_vmcs02_fields_for_emulation(vmx, vmcs12);
 
+		if (!initp) {
+			pkvm_info("pkvm launcing a protected VM\n%s\n", debug_dump_vmcs());
+			initp = 1;
+		}
+
 		/* mark guest mode */
 		vcpu->arch.hflags |= HF_GUEST_MASK;
 
@@ -761,9 +783,9 @@ static void setup_guest_ept(struct shadow_vcpu_state *shadow_vcpu, u64 guest_ept
 	struct pkvm_shadow_vm *vm = shadow_vcpu->vm;
 	bool invalidate = false;
 
-	if (!is_valid_eptp(guest_eptp))
+	if (!is_valid_eptp(guest_eptp)) {
 		pkvm_guest_ept_deinit(shadow_vcpu);
-	else if (vmcs12->ept_pointer != guest_eptp) {
+	} else if (vmcs12->ept_pointer != guest_eptp) {
 		pkvm_guest_ept_deinit(shadow_vcpu);
 		pkvm_guest_ept_init(shadow_vcpu, guest_eptp);
 	}
@@ -829,102 +851,145 @@ int handle_vmptrld(struct kvm_vcpu *vcpu)
 	struct vmcs *vmcs02;
 	struct vmcs12 *vmcs12;
 	gpa_t vmptr;
-	int r;
+	int r = 0;
+	s64 handle;
 
-	if (check_vmx_permission(vcpu)) {
-		if (nested_vmx_get_vmptr(vcpu, &vmptr, &r)) {
+	if (!check_vmx_permission(vcpu))
+		return 0;
+
+	if (nested_vmx_get_vmptr(vcpu, &vmptr, &r)) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+		goto out;
+	} else if (vmptr == vmx->nested.vmxon_ptr) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_VMXON_POINTER);
+		goto out;
+	} else if (vmptr % PAGE_SIZE) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+		goto out;
+	} else if (!validate_vmcs_revision_id(vcpu, vmptr)) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INCORRECT_VMCS_REVISION_ID);
+		goto out;
+	} else {
+		if (vmx->nested.current_vmptr == vmptr) {
+			nested_vmx_result(VMsucceed, 0);
+			goto out;
+		}
+		/*
+		 * For pkvm, we have one non-nested L1 guest that is the host. Hence,
+		 * vmcs01 always refers to the host.
+		 *
+		 * - we enter with vmcs01 (so host) as loaded_vmcs
+		 * - save vmcs02 (guest) to (cached_)vmcs12
+		 * - return to vmcs01
+		 */
+		nested_release_vmcs12(vcpu);
+
+		handle = find_shadow_vcpu_handle_by_vmcs(vmptr);
+		if (handle <= 0) {
 			nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
-			return r;
-		} else if (vmptr == vmx->nested.vmxon_ptr) {
-			nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_VMXON_POINTER);
-		} else if (!validate_vmcs_revision_id(vcpu, vmptr)) {
-			nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INCORRECT_VMCS_REVISION_ID);
-		} else {
-			if (vmx->nested.current_vmptr != vmptr) {
-				s64 handle;
+			goto out;
+		}
+		shadow_vcpu = get_shadow_vcpu(handle);
+		if (!shadow_vcpu) {
+			nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+			goto out;
+		}
+		vmcs02 = (struct vmcs *)shadow_vcpu->vmcs02;
+		vmcs12 = (struct vmcs12 *)shadow_vcpu->cached_vmcs12;
 
-				nested_release_vmcs12(vcpu);
+		read_gpa(vcpu, vmptr, vmcs12, VMCS12_SIZE);
+		vmx->nested.dirty_vmcs12 = true;
 
-				handle = find_shadow_vcpu_handle_by_vmcs(vmptr);
-				shadow_vcpu = handle > 0 ? get_shadow_vcpu(handle) : NULL;
-				if ((handle > 0) && shadow_vcpu) {
-					vmcs02 = (struct vmcs *)shadow_vcpu->vmcs02;
-					vmcs12 = (struct vmcs12 *) shadow_vcpu->cached_vmcs12;
+		/*
+		 * Save vmcs01 (loaded_vmcs) guest state for possible emulation when
+		 * calling sync_vmcs12_dirty_fields_to_vmcs02. Only a few fields are
+		 * saved.
+		 */
+		save_vmcs01_fields_for_emulation(vmx);
 
-					read_gpa(vcpu, vmptr, vmcs12, VMCS12_SIZE);
-					vmx->nested.dirty_vmcs12 = true;
+		/*
+		 * Init vmcs02 if needed and load it
+		 */
+		WRITE_ONCE(shadow_vcpu->vcpu, vcpu);
+		if (!shadow_vcpu->vmcs02_inited) {
+			memset(vmcs02, 0, vmx_basic_vmcs_size(pkvm_hyp->vmcs_config.basic));
+			vmcs02->hdr.revision_id = vmx_basic_vmcs_revision_id(pkvm_hyp->vmcs_config.basic);
+			vmcs_load_track(vmx, vmcs02);
+			pkvm_init_host_state_area(pkvm_hvcpu->pcpu, vcpu->cpu);
+			vmcs_writel(HOST_RIP, (unsigned long)__pkvm_vmx_vmexit);
+			/*
+			 * EPTP is mantained by pKVM and configured with
+			 * shadow EPTP from its corresponding shadow VM.
+			 * As shadow EPTP is not changed at runtime, set
+			 * it to EPTP when the first time this vmcs02 is
+			 * loading.
+			 */
+			vmcs_write64(EPT_POINTER,
+				     shadow_vcpu->vm->sept_desc.shadow_eptp);
+			/*
+			 * Flush the shadow eptp in case there are stale
+			 * entries which are not flushed when destroying
+			 * this shadow EPTP at last time.
+			 */
+			pkvm_flush_shadow_ept(&shadow_vcpu->vm->sept_desc);
 
-					WRITE_ONCE(shadow_vcpu->vcpu, vcpu);
-					if (!shadow_vcpu->vmcs02_inited) {
-						memset(vmcs02, 0, vmx_basic_vmcs_size(pkvm_hyp->vmcs_config.basic));
-						vmcs02->hdr.revision_id = vmx_basic_vmcs_revision_id(pkvm_hyp->vmcs_config.basic);
-						vmcs_load_track(vmx, vmcs02);
-						pkvm_init_host_state_area(pkvm_hvcpu->pcpu, vcpu->cpu);
-						vmcs_writel(HOST_RIP, (unsigned long)__pkvm_vmx_vmexit);
-						/*
-						 * EPTP is mantained by pKVM and configured with
-						 * shadow EPTP from its corresponding shadow VM.
-						 * As shadow EPTP is not changed at runtime, set
-						 * it to EPTP when the first time this vmcs02 is
-						 * loading.
-						 */
-						vmcs_write64(EPT_POINTER,
-							     shadow_vcpu->vm->sept_desc.shadow_eptp);
-						/*
-						 * Flush the shadow eptp in case there are stale
-						 * entries which are not flushed when destroying
-						 * this shadow EPTP at last time.
-						 */
-						pkvm_flush_shadow_ept(&shadow_vcpu->vm->sept_desc);
-
-						/*
-						 * Write the #VE information physical address.
-						 */
-						if (shadow_vcpu_is_protected(shadow_vcpu)) {
-							memset(&shadow_vcpu->ve_info, 0, sizeof(shadow_vcpu->ve_info));
-							if (vmx_has_ept_violation_ve()) {
-								vmcs_write64(VE_INFORMATION_ADDRESS,
-									     __pkvm_pa(&shadow_vcpu->ve_info));
-							}
-						}
-
-						shadow_vcpu->last_cpu = vcpu->cpu;
-						shadow_vcpu->vmcs02_inited = true;
-					} else {
-						vmcs_load_track(vmx, vmcs02);
-						if (shadow_vcpu->last_cpu != vcpu->cpu) {
-							pkvm_init_host_state_area(pkvm_hvcpu->pcpu, vcpu->cpu);
-							shadow_vcpu->last_cpu = vcpu->cpu;
-						}
-					}
-
-					pkvm_hvcpu->current_shadow_vcpu = shadow_vcpu;
-
-					copy_shadow_fields_vmcs12_to_vmcs02(vmx, vmcs12);
-					sync_vmcs12_dirty_fields_to_vmcs02(vmx, vmcs12);
-					vmcs_clear_track(vmx, vmcs02);
-					set_shadow_indicator(vmcs02);
-
-					/* enable shadowing */
-					vmcs_load_track(vmx, vmx->loaded_vmcs->vmcs);
-					vmcs_write64(VMREAD_BITMAP, __pkvm_pa_symbol(vmx_vmread_bitmap));
-					vmcs_write64(VMWRITE_BITMAP, __pkvm_pa_symbol(vmx_vmwrite_bitmap));
-					secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_SHADOW_VMCS);
-					vmcs_write64(VMCS_LINK_POINTER, __pkvm_pa(vmcs02));
-
-					vmx->nested.current_vmptr = vmptr;
-
-					nested_vmx_result(VMsucceed, 0);
-				} else {
-					nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+			/*
+			 * Write the #VE information physical address.
+			 */
+			if (shadow_vcpu_is_protected(shadow_vcpu)) {
+				memset(&shadow_vcpu->ve_info, 0, sizeof(shadow_vcpu->ve_info));
+				if (vmx_has_ept_violation_ve()) {
+					vmcs_write64(VE_INFORMATION_ADDRESS,
+						     __pkvm_pa(&shadow_vcpu->ve_info));
 				}
-			} else {
-				nested_vmx_result(VMsucceed, 0);
+			}
+			shadow_vcpu->last_cpu = vcpu->cpu;
+			shadow_vcpu->vmcs02_inited = true;
+		} else {
+			vmcs_load_track(vmx, vmcs02);
+			if (shadow_vcpu->last_cpu != vcpu->cpu) {
+				pkvm_init_host_state_area(pkvm_hvcpu->pcpu, vcpu->cpu);
+				shadow_vcpu->last_cpu = vcpu->cpu;
 			}
 		}
-	}
 
-	return 0;
+		/*
+		 * This appears to be missing:
+		 *
+		 * IF rev[30:0] ≠ VMCS revision identifier supported by processor OR
+		 * rev[31] = 1 AND processor does not support 1-setting of “VMCS shadowing”
+		 * THEN VMfail(VMPTRLD with incorrect VMCS revision identifier);
+		 * ELSE
+		 *      current-VMCS pointer := addr;
+		 *      VMsucceed;
+		 * FI;
+		 */
+		pkvm_hvcpu->current_shadow_vcpu = shadow_vcpu;
+
+		/*
+		 * Copy back above-saved elements from vmcs12 to vmcs02 and make it shadow.
+		 * Since we copy the kvm config, please audit.
+		 */
+		copy_shadow_fields_vmcs12_to_vmcs02(vmx, vmcs12);
+		sync_vmcs12_dirty_fields_to_vmcs02(vmx, vmcs12);
+		vmcs_clear_track(vmx, vmcs02);
+		set_shadow_indicator(vmcs02);
+
+		/*
+		 * Return back to vmcs01 aka loaded_vmcs, we return to the host.
+		 */
+		vmcs_load_track(vmx, vmx->loaded_vmcs->vmcs);
+		vmcs_write64(VMREAD_BITMAP, __pkvm_pa_symbol(vmx_vmread_bitmap));
+		vmcs_write64(VMWRITE_BITMAP, __pkvm_pa_symbol(vmx_vmwrite_bitmap));
+		secondary_exec_controls_setbit(vmx, SECONDARY_EXEC_SHADOW_VMCS);
+		vmcs_write64(VMCS_LINK_POINTER, __pkvm_pa(vmcs02));
+
+		vmx->nested.current_vmptr = vmptr;
+
+		nested_vmx_result(VMsucceed, 0);
+	}
+out:
+	return r;
 }
 
 int handle_vmclear(struct kvm_vcpu *vcpu)
@@ -932,26 +997,31 @@ int handle_vmclear(struct kvm_vcpu *vcpu)
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	gpa_t vmptr;
 	u32 zero = 0;
-	int r;
+	int r = 0;
 
-	if (check_vmx_permission(vcpu)) {
-		if (nested_vmx_get_vmptr(vcpu, &vmptr, &r)) {
-			nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
-			return r;
-		} else if (vmptr == vmx->nested.vmxon_ptr) {
-			nested_vmx_result(VMfailValid, VMXERR_VMCLEAR_VMXON_POINTER);
-		} else {
-			if (vmx->nested.current_vmptr == vmptr)
-				nested_release_vmcs12(vcpu);
+	if (!check_vmx_permission(vcpu))
+		return 0;
 
-			write_gpa(vcpu, vmptr + offsetof(struct vmcs12, launch_state),
-					&zero, sizeof(zero));
+	if (nested_vmx_get_vmptr(vcpu, &vmptr, &r)) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+		goto out;
+	} else if (vmptr == vmx->nested.vmxon_ptr) {
+		nested_vmx_result(VMfailValid, VMXERR_VMCLEAR_VMXON_POINTER);
+		goto out;
+	} else if (vmptr % PAGE_SIZE) {
+		nested_vmx_result(VMfailValid, VMXERR_VMPTRLD_INVALID_ADDRESS);
+		goto out;
+	} else {
+		if (vmx->nested.current_vmptr == vmptr)
+			nested_release_vmcs12(vcpu);
 
-			nested_vmx_result(VMsucceed, 0);
-		}
+		write_gpa(vcpu, vmptr + offsetof(struct vmcs12, launch_state),
+				&zero, sizeof(zero));
+
+		nested_vmx_result(VMsucceed, 0);
 	}
-
-	return 0;
+out:
+	return r;
 }
 
 int handle_vmwrite(struct kvm_vcpu *vcpu)
@@ -961,74 +1031,78 @@ int handle_vmwrite(struct kvm_vcpu *vcpu)
 	struct shadow_vcpu_state *cur_shadow_vcpu = pkvm_hvcpu->current_shadow_vcpu;
 	struct vmcs12 *vmcs12 = (struct vmcs12 *)cur_shadow_vcpu->cached_vmcs12;
 	u32 instr_info = vmcs_read32(VMX_INSTRUCTION_INFO);
-	struct x86_exception e;
 	unsigned long field;
 	short offset;
 	gva_t gva;
-	int r, reg;
+	int reg;
 	u64 value = 0;
 
-	if (check_vmx_permission(vcpu)) {
-		if (vmx->nested.current_vmptr == INVALID_GPA) {
-			nested_vmx_result(VMfailInvalid, 0);
-		} else {
-			if (instr_info & BIT(10)) {
-				reg = ((instr_info) >> 3) & 0xf;
-				value = vcpu->arch.regs[reg];
-			} else {
-				if (get_vmx_mem_address(vcpu, vmx->exit_qualification,
-							instr_info, &gva))
-					return 1;
+	if (!check_vmx_permission(vcpu))
+		return 0;
 
-				r = read_gva(vcpu, gva, &value, 8, &e);
-				if (r < 0) {
-					/*TODO: handle memory failure exception */
-					return r;
-				}
-			}
+	if (vmx->nested.current_vmptr == INVALID_GPA) {
+		nested_vmx_result(VMfailInvalid, 0);
+		return 0;
+	}
 
-			reg = ((instr_info) >> 28) & 0xf;
-			field = vcpu->arch.regs[reg];
+	if (instr_info & BIT(10)) {
+		reg = ((instr_info) >> 3) & 0xf;
+		value = vcpu->arch.regs[reg];
+	} else {
+		struct x86_exception e;
+		int r;
 
-			offset = get_vmcs12_field_offset(field);
-			if (offset < 0) {
-				nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
-				return 0;
-			}
+		if (get_vmx_mem_address(vcpu, vmx->exit_qualification,
+					instr_info, &gva))
+			return 1;
 
-			/*TODO: check vcpu supports "VMWRITE to any supported field in the VMCS"*/
-			if (vmcs_field_readonly(field)) {
-				nested_vmx_result(VMfailInvalid, VMXERR_VMWRITE_READ_ONLY_VMCS_COMPONENT);
-				return 0;
-			}
-
-			/*
-			 * Some Intel CPUs intentionally drop the reserved bits of the AR byte
-			 * fields on VMWRITE.  Emulate this behavior to ensure consistent KVM
-			 * behavior regardless of the underlying hardware, e.g. if an AR_BYTE
-			 * field is intercepted for VMWRITE but not VMREAD (in L1), then VMREAD
-			 * from L1 will return a different value than VMREAD from L2 (L1 sees
-			 * the stripped down value, L2 sees the full value as stored by KVM).
-			 */
-			if (field >= GUEST_ES_AR_BYTES && field <= GUEST_TR_AR_BYTES)
-				value &= 0x1f0ff;
-
-			if (field == EPT_POINTER)
-				setup_guest_ept(cur_shadow_vcpu, value);
-
-			vmcs12_write_any(vmcs12, field, offset, value);
-
-			if (is_emulated_fields(field)) {
-				vmx->nested.dirty_vmcs12 = true;
-				nested_vmx_result(VMsucceed, 0);
-			} else if (is_host_fields(field)) {
-				nested_vmx_result(VMsucceed, 0);
-			} else {
-				pkvm_err("%s: not include emulated fields 0x%lx, please add!\n",
-						__func__, field);
-				nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
-			}
+		r = read_gva(vcpu, gva, &value, 8, &e);
+		if (r < 0) {
+			/*TODO: handle memory failure exception */
+			return r;
 		}
+	}
+
+	reg = ((instr_info) >> 28) & 0xf;
+	field = vcpu->arch.regs[reg];
+
+	offset = get_vmcs12_field_offset(field);
+	if (offset < 0) {
+		nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
+		return 0;
+	}
+
+	/* TODO: check vcpu supports "VMWRITE to any supported field in the VMCS" */
+	if (vmcs_field_readonly(field)) {
+		nested_vmx_result(VMfailInvalid, VMXERR_VMWRITE_READ_ONLY_VMCS_COMPONENT);
+		return 0;
+	}
+
+	/*
+	 * Some Intel CPUs intentionally drop the reserved bits of the AR byte
+	 * fields on VMWRITE.  Emulate this behavior to ensure consistent KVM
+	 * behavior regardless of the underlying hardware, e.g. if an AR_BYTE
+	 * field is intercepted for VMWRITE but not VMREAD (in L1), then VMREAD
+	 * from L1 will return a different value than VMREAD from L2 (L1 sees
+	 * the stripped down value, L2 sees the full value as stored by KVM).
+	 */
+	if (field >= GUEST_ES_AR_BYTES && field <= GUEST_TR_AR_BYTES)
+		value &= 0x1f0ff;
+
+	if (field == EPT_POINTER)
+		setup_guest_ept(cur_shadow_vcpu, value);
+
+	vmcs12_write_any(vmcs12, field, offset, value);
+
+	if (is_emulated_fields(field)) {
+		vmx->nested.dirty_vmcs12 = true;
+		nested_vmx_result(VMsucceed, 0);
+	} else if (is_host_fields(field)){
+		nested_vmx_result(VMsucceed, 0);
+	} else {
+		pkvm_err("%s: not include emulated fields 0x%lx, please add!\n",
+			__func__, field);
+		nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
 	}
 
 	return 0;
@@ -1041,43 +1115,47 @@ int handle_vmread(struct kvm_vcpu *vcpu)
 	struct shadow_vcpu_state *cur_shadow_vcpu = pkvm_hvcpu->current_shadow_vcpu;
 	struct vmcs12 *vmcs12 = (struct vmcs12 *)cur_shadow_vcpu->cached_vmcs12;
 	u32 instr_info = vmcs_read32(VMX_INSTRUCTION_INFO);
-	struct x86_exception e;
 	unsigned long field;
 	short offset;
 	gva_t gva = 0;
-	int r, reg;
+	int reg;
 	u64 value;
 
-	if (check_vmx_permission(vcpu)) {
-		if (vmx->nested.current_vmptr == INVALID_GPA) {
-			nested_vmx_result(VMfailInvalid, 0);
+	if (!check_vmx_permission(vcpu))
+		return 0;
+
+	if (vmx->nested.current_vmptr == INVALID_GPA) {
+		nested_vmx_result(VMfailInvalid, 0);
+		return 0;
+	}
+
+	/* Decode instruction info and find the field to read */
+	reg = ((instr_info) >> 28) & 0xf;
+	field = vcpu->arch.regs[reg];
+
+	offset = get_vmcs12_field_offset(field);
+	if (offset < 0) {
+		nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
+	} else {
+		value = vmcs12_read_any(vmcs12, field, offset);
+		if (instr_info & BIT(10)) {
+			reg = ((instr_info) >> 3) & 0xf;
+			vcpu->arch.regs[reg] = value;
 		} else {
-			/* Decode instruction info and find the field to read */
-			reg = ((instr_info) >> 28) & 0xf;
-			field = vcpu->arch.regs[reg];
+			struct x86_exception e;
+			int r;
 
-			offset = get_vmcs12_field_offset(field);
-			if (offset < 0) {
-				nested_vmx_result(VMfailInvalid, VMXERR_UNSUPPORTED_VMCS_COMPONENT);
-			} else {
-				value = vmcs12_read_any(vmcs12, field, offset);
-				if (instr_info & BIT(10)) {
-					reg = ((instr_info) >> 3) & 0xf;
-					vcpu->arch.regs[reg] = value;
-				} else {
-					if (get_vmx_mem_address(vcpu, vmx->exit_qualification,
-								instr_info, &gva))
-						return 1;
+			if (get_vmx_mem_address(vcpu, vmx->exit_qualification,
+						instr_info, &gva))
+				return 1;
 
-					r = write_gva(vcpu, gva, &value, 8, &e);
-					if (r < 0) {
-						/*TODO: handle memory failure exception */
-						return r;
-					}
-				}
-				nested_vmx_result(VMsucceed, 0);
+			r = write_gva(vcpu, gva, &value, 8, &e);
+			if (r < 0) {
+				/*TODO: handle memory failure exception */
+				return r;
 			}
 		}
+		nested_vmx_result(VMsucceed, 0);
 	}
 
 	return 0;
@@ -1097,6 +1175,7 @@ int handle_vmlaunch(struct kvm_vcpu *vcpu)
 		nested_vmx_run(vcpu, true);
 
 	debug_validate_vmcs();
+
 	return 0;
 }
 
@@ -1345,6 +1424,77 @@ static void pkvm_get_ve_info(struct kvm_vcpu *vcpu)
 	ve->valid = 0;
 }
 
+/* FIXME: Test kludge */
+int pkvm_add_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
+{
+	int i = 0;
+
+	if (!vm || !size)
+		return -EINVAL;
+
+	while (i <= PKVM_MAX_SHARES) {
+		if (vm->shares[i].size == 0) {
+			vm->shares[i].gpa = gpa;
+			vm->shares[i].size = size;
+			return 0;
+		}
+		i++;
+	}
+	return -ENOSPC;
+}
+
+int pkvm_del_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
+{
+	u64 s, e;
+	int i = 0;
+
+	if (!vm || !size)
+		return -EINVAL;
+
+	while (i <= PKVM_MAX_SHARES) {
+		s = vm->shares[i].gpa ;
+		e = s + vm->shares[i].size;
+		if ((gpa >= s) && (gpa + size < e)) {
+			vm->shares[i].gpa = 0x0;
+			vm->shares[i].size = 0x0;
+			return 0;
+		}
+		i++;
+	}
+	return -ENOENT;
+}
+
+int pkvm_is_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
+{
+	u64 s, e;
+	int i = 0;
+
+	if (!vm || !size)
+		return 0;
+
+	while (i <= PKVM_MAX_SHARES) {
+		s = vm->shares[i].gpa;
+		e = s + vm->shares[i].size;
+		if ((gpa >= s) && ((gpa + size) < e))
+			return 1;
+		i++;
+	}
+	return 0;
+}
+
+int pkvm_page_owner(unsigned long addr)
+{
+	u64 phys, spte;
+	int l;
+
+	phys = guest_ept_lookup(&pkvm_hyp->host_vm.host_vcpus[0]->vmx.vcpu,
+			        pkvm_hyp->host_vm.ept->root_pa,
+				addr, &spte, &l);
+	if (phys != ~0)
+		return PKVM_HOST_HANDLE;
+	return (int)(spte >> 12) & 0xF;
+}
+
 static bool nested_handle_vmcall(struct kvm_vcpu *vcpu)
 {
 	u64 nr, a0, a1, a2, a3;
@@ -1366,10 +1516,17 @@ static bool nested_handle_vmcall(struct kvm_vcpu *vcpu)
 	switch (nr) {
 	case PKVM_GHC_SHARE_MEM:
 		ret = __pkvm_guest_share_host(pgstate_pgt, a0, a1);
+		/* FIXME: FLAG VMXROOT */
+		if (!ret)
+			ret = pkvm_add_share(shadow_vcpu->vm, a0, a1);
+
 		handled = true;
 		break;
 	case PKVM_GHC_UNSHARE_MEM:
 		ret = __pkvm_guest_unshare_host(pgstate_pgt, a0, a1);
+		/* FIXME: FLAG VMXROOT */
+		if (!ret)
+			ret = pkvm_del_share(shadow_vcpu->vm, a0, a1);
 		handled = true;
 		break;
 	case PKVM_GHC_GET_VE_INFO:

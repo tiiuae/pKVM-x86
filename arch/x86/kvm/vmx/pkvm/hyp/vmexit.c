@@ -79,9 +79,68 @@ static void handle_cr(struct kvm_vcpu *vcpu)
 	}
 }
 
+static inline int vmptrst(uint64_t *value)
+{
+	u64 tmp;
+	u8 ret;
+
+	asm volatile("vmptrst %[value]; setna %[ret]"
+		: [value]"=m"(tmp), [ret]"=rm"(ret)
+		: : "cc", "memory");
+
+	*value = tmp;
+	return ret;
+}
+
+static int pkvm_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
+				    int et, void *insn, int ilen)
+{
+	struct shadow_vcpu_state *shadow_vcpu;
+	u64 vmptr;
+	int ret;
+
+	shadow_vcpu = get_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+	if (!shadow_vcpu)
+		BUG();
+
+	vmptrst(&vmptr);
+	barrier();
+	vmcs_load((struct vmcs *)shadow_vcpu->vmcs02);
+
+	ret = __x86_emulate_instruction(vcpu, cr2_or_gpa, et, insn, ilen);
+
+	vmcs_load(pkvm_phys_to_virt(vmptr));
+	barrier();
+
+	return ret;
+}
+
+static int pkvm_inject_events(struct kvm_vcpu *vcpu,
+			      bool *req_immediate_exit)
+{
+	struct shadow_vcpu_state *shadow_vcpu;
+	u64 vmptr;
+	int ret;
+
+	shadow_vcpu = get_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+	if (!shadow_vcpu)
+		BUG();
+
+	vmptrst(&vmptr);
+	barrier();
+	vmcs_load((struct vmcs *)shadow_vcpu->vmcs02);
+
+	ret = __kvm_check_and_inject_events(vcpu, req_immediate_exit);
+
+	vmcs_load(pkvm_phys_to_virt(vmptr));
+	barrier();
+
+	return ret;
+}
+
 static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 {
-	u64 nr, a0, a1, a2, a3;
+	u64 nr, a0, a1, a2, a3, a4;
 	unsigned long ret = 0;
 
 	nr = vcpu->arch.regs[VCPU_REGS_RAX];
@@ -89,6 +148,7 @@ static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 	a1 = vcpu->arch.regs[VCPU_REGS_RCX];
 	a2 = vcpu->arch.regs[VCPU_REGS_RDX];
 	a3 = vcpu->arch.regs[VCPU_REGS_RSI];
+	a4 = vcpu->arch.regs[VCPU_REGS_RDI];
 
 	switch (nr) {
 	case PKVM_HC_SET_VMEXIT_TRACE:
@@ -104,7 +164,8 @@ static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 		ret = __pkvm_init_shadow_vm(vcpu, a0, a1, a2);
 		break;
 	case PKVM_HC_INIT_SHADOW_VCPU:
-		ret = __pkvm_init_shadow_vcpu(vcpu, a0, a1, a2, a3);
+		ret = __pkvm_init_shadow_vcpu(vcpu, a0, a1, a2, a3,
+					     (struct kvm_vcpu *)a4);
 		break;
 	case PKVM_HC_FINALIZE_SHADOW_VM:
 		ret = __pkvm_finalize_shadow_vm(a0, a1, a2);
@@ -124,6 +185,13 @@ static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 	case PKVM_HC_TLB_REMOTE_FLUSH_RANGE:
 		nested_invalidate_shadow_ept(a0, a1, a2);
 		break;
+	case PKVM_HC_EMULATE_INSN:
+		ret = pkvm_emulate_instruction((struct kvm_vcpu *)a0, a1, a2,
+					       (void *)a3, a4);
+		break;
+	case PKVM_HC_INJECT_EVENTS:
+		ret = pkvm_inject_events((struct kvm_vcpu *)a0, (bool *)a1);
+		break;
 	case PKVM_HC_SET_MMIO_VE:
 		pkvm_shadow_clear_suppress_ve(vcpu, a0);
 		break;
@@ -134,7 +202,9 @@ static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 		ret = pkvm_prepare_vm_coredump((struct mm_struct *)a0);
 		break;
 	default:
+		pkvm_dbg("%s: CPU%d UNHANDLED VMCALL %llu\n", __func__, vcpu->cpu, nr);
 		ret = -EINVAL;
+		break;
 	}
 
 	return ret;
@@ -191,9 +261,14 @@ int pkvm_main(struct kvm_vcpu *vcpu)
 {
 	struct vcpu_vmx *vmx = to_vmx(vcpu);
 	int launch = 1;
+	int ret;
 
 	vcpu->mode = IN_GUEST_MODE;
 
+	/*
+	 *  FIXME: do stack cleanup as we will never return from this function.
+	 *         all the memory above pkvm_main can be reused
+	 */
 	do {
 		bool skip_instruction = false, guest_exit = false;
 
@@ -293,8 +368,11 @@ int pkvm_main(struct kvm_vcpu *vcpu)
 				skip_instruction = true;
 				break;
 			case EXIT_REASON_EPT_VIOLATION:
-				if (handle_host_ept_violation(vcpu, &skip_instruction))
-					pkvm_err("pkvm: handle host ept violation failed\n");
+				ret = handle_host_ept_violation(vcpu, &skip_instruction);
+				if (ret)
+					pkvm_err("%s: handle_host_ept_violation 0x%llx: %d\n",
+						 __func__, vmcs_read64(GUEST_PHYSICAL_ADDRESS),
+						 ret);
 				break;
 			case EXIT_REASON_INTERRUPT_WINDOW:
 				handle_irq_window(vcpu);
@@ -308,12 +386,15 @@ int pkvm_main(struct kvm_vcpu *vcpu)
 				skip_instruction = true;
 				break;
 			case EXIT_REASON_IO_INSTRUCTION:
-				if (handle_host_pio(vcpu))
-					pkvm_err("pkvm: handle host port I/O access failed\n");
+				ret = handle_host_pio(vcpu);
+				if (ret)
+					pkvm_err("%s: handle_host_pio: %d\n", __func__,
+						 ret);
 				skip_instruction = true;
 				break;
 			default:
-				pkvm_dbg("CPU%d: Unsupported vmexit reason 0x%x.\n", vcpu->cpu, vmx->exit_reason.full);
+				pkvm_dbg("CPU%d: Unsupported vmexit reason 0x%x.\n",
+					 vcpu->cpu, vmx->exit_reason.full);
 				skip_instruction = true;
 				break;
 			}

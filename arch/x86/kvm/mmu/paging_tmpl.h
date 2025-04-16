@@ -21,6 +21,8 @@
  * once per guest PTE type.  The per-type defines are #undef'd at the end.
  */
 
+#include <asm/kvm_pkvm.h>
+
 #if PTTYPE == 64
 	#define pt_element_t u64
 	#define guest_walker guest_walker64
@@ -34,6 +36,7 @@
 	#else
 	#define PT_MAX_FULL_LEVELS 2
 	#endif
+	#define __get_user_hyp __get_user_hyp64
 #elif PTTYPE == 32
 	#define pt_element_t u32
 	#define guest_walker guest_walker32
@@ -43,6 +46,8 @@
 	#define PT_GUEST_DIRTY_SHIFT PT_DIRTY_SHIFT
 	#define PT_GUEST_ACCESSED_SHIFT PT_ACCESSED_SHIFT
 	#define PT_HAVE_ACCESSED_DIRTY(mmu) true
+	#undef __get_user_hyp
+	#define __get_user_hyp __get_user_hyp32
 
 	#define PT32_DIR_PSE36_SIZE 4
 	#define PT32_DIR_PSE36_SHIFT 13
@@ -57,6 +62,7 @@
 	#define PT_GUEST_ACCESSED_SHIFT 8
 	#define PT_HAVE_ACCESSED_DIRTY(mmu) (!(mmu)->cpu_role.base.ad_disabled)
 	#define PT_MAX_FULL_LEVELS PT64_ROOT_MAX_LEVEL
+	#define __get_user_hyp __get_user_hyp64
 #else
 	#error Invalid PTTYPE value
 #endif
@@ -402,8 +408,19 @@ retry_walk:
 			goto error;
 
 		ptep_user = (pt_element_t __user *)((void *)host_addr + offset);
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+		if (!in_hyp_mode()) {
+			if (unlikely(__get_user(pte, ptep_user)))
+				goto error;
+		} else {
+			/* FIXME: this can fault and schedule */
+			if (unlikely(__get_user_hyp(vcpu, &pte, ptep_user)))
+				goto error;
+		}
+#else
 		if (unlikely(__get_user(pte, ptep_user)))
 			goto error;
+#endif
 		walker->ptep_user[walker->level - 1] = ptep_user;
 
 		trace_kvm_mmu_paging_element(pte, walker->level);

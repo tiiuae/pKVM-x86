@@ -52,6 +52,7 @@
 
 #include <asm/processor.h>
 #include <asm/ioctl.h>
+#include <asm/current.h>
 #include <linux/uaccess.h>
 
 #include "coalesced_mmio.h"
@@ -66,6 +67,9 @@
 
 #include <linux/kvm_dirty_ring.h>
 
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+#include <asm/kvm_pkvm.h>
+#endif
 
 /* Worst case buffer size needed for holding an integer. */
 #define ITOA_MAX_LEN 12
@@ -1613,6 +1617,7 @@ static int check_memory_region_flags(struct kvm *kvm,
 static void kvm_swap_active_memslots(struct kvm *kvm, int as_id)
 {
 	struct kvm_memslots *slots = kvm_get_inactive_memslots(kvm, as_id);
+	struct task_struct *cur;
 
 	/* Grab the generation from the activate memslots. */
 	u64 gen = __kvm_memslots(kvm, as_id)->generation;
@@ -1644,7 +1649,13 @@ static void kvm_swap_active_memslots(struct kvm *kvm, int as_id)
 	 */
 	mutex_unlock(&kvm->slots_arch_lock);
 
-	synchronize_srcu_expedited(&kvm->srcu);
+	/*
+	 * FIXME: a hack. We can swap memslots from the vmcall handler,
+	 * so don't sync in that case.
+	 */
+	cur = get_current();
+	if (cur->pid != 1)
+		synchronize_srcu_expedited(&kvm->srcu);
 
 	/*
 	 * Increment the new memslot generation a second time, dropping the
@@ -1835,8 +1846,8 @@ static void kvm_invalidate_memslot(struct kvm *kvm,
 	old->arch = invalid_slot->arch;
 }
 
-static void kvm_create_memslot(struct kvm *kvm,
-			       struct kvm_memory_slot *new)
+void kvm_create_memslot(struct kvm *kvm,
+			struct kvm_memory_slot *new)
 {
 	/* Add the new memslot to the inactive set and activate. */
 	kvm_replace_memslot(kvm, NULL, new);
@@ -3281,6 +3292,7 @@ static int __kvm_read_guest_page(struct kvm_memory_slot *slot, gfn_t gfn,
 	addr = gfn_to_hva_memslot_prot(slot, gfn, NULL);
 	if (kvm_is_error_hva(addr))
 		return -EFAULT;
+
 	r = __copy_from_user(data, (void __user *)addr + offset, len);
 	if (r)
 		return -EFAULT;
@@ -3291,6 +3303,17 @@ int kvm_read_guest_page(struct kvm *kvm, gfn_t gfn, void *data, int offset,
 			int len)
 {
 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	struct kvm_vcpu *vcpu;
+	int res;
+
+	if (in_hyp_mode()) {
+		vcpu = kvm_get_vcpu(kvm, 0);
+		res = __hyp_read_guest_page(vcpu, slot, gfn, data, offset, len);
+		if (res != -ENOTSUPP)
+			return res;
+	}
+#endif
 
 	return __kvm_read_guest_page(slot, gfn, data, offset, len);
 }
@@ -3300,7 +3323,15 @@ int kvm_vcpu_read_guest_page(struct kvm_vcpu *vcpu, gfn_t gfn, void *data,
 			     int offset, int len)
 {
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	int res;
 
+	if (in_hyp_mode()) {
+		res = __hyp_read_guest_page(vcpu, slot, gfn, data, offset, len);
+		if (res != -ENOTSUPP)
+			return res;
+	}
+#endif
 	return __kvm_read_guest_page(slot, gfn, data, offset, len);
 }
 EXPORT_SYMBOL_GPL(kvm_vcpu_read_guest_page);
@@ -3390,6 +3421,7 @@ static int __kvm_write_guest_page(struct kvm *kvm,
 	addr = gfn_to_hva_memslot(memslot, gfn);
 	if (kvm_is_error_hva(addr))
 		return -EFAULT;
+
 	r = __copy_to_user((void __user *)addr + offset, data, len);
 	if (r)
 		return -EFAULT;
@@ -3401,7 +3433,17 @@ int kvm_write_guest_page(struct kvm *kvm, gfn_t gfn,
 			 const void *data, int offset, int len)
 {
 	struct kvm_memory_slot *slot = gfn_to_memslot(kvm, gfn);
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	struct kvm_vcpu *vcpu;
+	int res;
 
+	if (in_hyp_mode()) {
+		vcpu = kvm_get_vcpu(kvm, 0);
+		res = __hyp_vcpu_write_guest_page(vcpu, slot, gfn, data, offset, len);
+		if (res != -ENOTSUPP)
+			return res;
+	}
+#endif
 	return __kvm_write_guest_page(kvm, slot, gfn, data, offset, len);
 }
 EXPORT_SYMBOL_GPL(kvm_write_guest_page);
@@ -3410,6 +3452,16 @@ int kvm_vcpu_write_guest_page(struct kvm_vcpu *vcpu, gfn_t gfn,
 			      const void *data, int offset, int len)
 {
 	struct kvm_memory_slot *slot = kvm_vcpu_gfn_to_memslot(vcpu, gfn);
+
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+	int res;
+
+	if (in_hyp_mode()) {
+		res = __hyp_vcpu_write_guest_page(vcpu, slot, gfn, data, offset, len);
+		if (res != -ENOTSUPP)
+			return res;
+	}
+#endif
 
 	return __kvm_write_guest_page(vcpu->kvm, slot, gfn, data, offset, len);
 }

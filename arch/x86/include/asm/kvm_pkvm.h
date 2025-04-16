@@ -8,6 +8,13 @@
 
 #include <linux/kvm_host.h>
 
+typedef enum {
+	d_a = 0,
+	d_s = 1,
+	d_k = 2,
+	d_p = 3,
+} dtype_t;
+
 #ifdef CONFIG_PKVM_INTEL
 
 #include <linux/memblock.h>
@@ -262,4 +269,52 @@ static inline int pkvm_vm_ioctl_enable_cap(struct kvm *kvm, struct kvm_enable_ca
 { return -EINVAL; }
 #endif
 
+#ifdef CONFIG_PKVM_INTEL
+unsigned long guest_ept_lookup(struct kvm_vcpu *vcpu, u64 eptp, u64 gpa, u64 *spte, int *);
+unsigned long guest_pgt_lookup(struct kvm_vcpu *vcpu, unsigned long vaddr);
+
+int print_host_maps(void);
+int print_guest_maps(struct kvm_vcpu *vcpu, dtype_t);
+#else
+static __maybe_unused int print_host_maps(void) { return 0; }
+static __maybe_unused int print_guest_maps(struct kvm_vcpu *vcpu, dtype_t) { return 0; }
+#endif
+
+#ifdef CONFIG_PKVM_INTEL_VMXROOT_MMIO
+bool in_hyp_mode(void);
+unsigned long read_cr3(void);
+int is_guest_ro(u64 addr, size_t);
+void init_guest_smm_dma(void *);
+int check_donation_whitelist(u64 addr, size_t size);
+unsigned long guest_virt_to_phys(struct kvm_vcpu *vcpu, u64 cr3, u64 virt_addr, u64 *, int *);
+unsigned long pkvm_user_to_phys(struct kvm_vcpu *vcpu, unsigned long vaddr);
+int __hyp_read_guest_page(struct kvm_vcpu *vcpu, struct kvm_memory_slot *slot, gfn_t gfn,
+			  void *data, int offset, int len);
+int __hyp_vcpu_write_guest_page(struct kvm_vcpu *vcpu, struct kvm_memory_slot *slot,
+				gfn_t gfn, const void *data, int offset, int len);
+static __maybe_unused int __get_user_hyp32(struct kvm_vcpu *vcpu, u32 *ret, u32 *addr)
+	{ return -ENOTSUPP; }
+int __get_user_hyp64(struct kvm_vcpu *vcpu, u64 *ret, u64 *addr);
+#else
+static __maybe_unused bool in_hyp_mode(void) { return false; }
+static __maybe_unused unsigned long read_cr3(void) { return ~0; }
+static __maybe_unused int is_guest_ro(u64 addr, size_t size) { return 0; };
+static __maybe_unused void init_guest_smm_dma(const void *) { };
+static __maybe_unused int check_donation_whitelist(u64 addr, size_t size) { return 0; }
+static __maybe_unused unsigned long guest_virt_to_phys(struct kvm_vcpu *vcpu, u64 cr3, u64 virt_addr, u64 *, int*)
+	{ return ~0; }
+static __maybe_unused unsigned long pkvm_user_to_phys(struct kvm_vcpu *vcpu, unsigned long vaddr)
+	{ return ~0; }
+static __maybe_unused int __get_user_hyp32(struct kvm_vcpu *vcpu, u32 *ret, u32 *addr)
+	{ return -ENOTSUPP; }
+static __maybe_unused int __get_user_hyp64(struct kvm_vcpu *vcpu, u64 *ret, u64 *addr)
+	{ return -ENOTSUPP; }
+static __maybe_unused int __hyp_read_guest_page(struct kvm_vcpu *vcpu, struct kvm_memory_slot *slot,
+						gfn_t gfn, void *data, int offset, int len)
+	{ return -ENOTSUPP; }
+static __maybe_unused int __hyp_vcpu_write_guest_page(struct kvm_vcpu *vcpu,
+						      struct kvm_memory_slot *slot, gfn_t gfn,
+						      const void *data, int offset, int len)
+	{ return -ENOTSUPP; }
+#endif
 #endif

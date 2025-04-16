@@ -350,6 +350,11 @@ static int do_donate(const struct pkvm_mem_transition *donation)
 {
 	int ret;
 
+	ret = check_donation_whitelist(donation->completer.guest.addr,
+				       donation->size);
+	if (ret)
+		return 0;
+
 	ret = check_donation(donation);
 	if (ret)
 		return ret;

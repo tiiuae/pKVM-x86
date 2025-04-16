@@ -27,6 +27,8 @@
 #include "io_emulate.h"
 #include "ve_emulation.h"
 
+extern bool pkvm_host_init_complete;
+
 static struct hyp_pool host_ept_pool;
 static struct pkvm_pgtable host_ept;
 static struct pkvm_pgtable host_ept_notlbflush;
@@ -355,17 +357,95 @@ static bool is_pvmfw_memory(unsigned long pa)
 	return pvmfw_present && pa >= pvmfw_base && pa < pvmfw_base + pvmfw_size;
 }
 
+static void __maybe_unused hexdump(const unsigned char *token,
+                                   const unsigned char *buf, unsigned short len)
+{
+	printk(KERN_CONT "%s", token);
+	for (int i=0; i < len; i++) {
+		printk(KERN_CONT "%02hhx:", buf[i]);
+	}
+}
+
+static void inject_guest_gpf(void)
+{
+	u32 intr_info = 0x80000B0DUL;
+	u32 errc = 0x1UL;
+	u32 ilen = vmcs_read32(VM_EXIT_INSTRUCTION_LEN);
+
+	vmcs_write32(VM_ENTRY_INTR_INFO_FIELD, intr_info);
+	vmcs_write32(VM_ENTRY_EXCEPTION_ERROR_CODE, (u16)errc);
+	vmcs_write32(VM_ENTRY_INSTRUCTION_LEN, ilen);
+	barrier();
+}
+
+static void handle_permission_violation(struct kvm_vcpu *vcpu)
+{
+	unsigned long gla = vmcs_readl(GUEST_LINEAR_ADDRESS);
+	unsigned long gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
+	unsigned long eip = vmcs_readl(GUEST_RIP);
+	unsigned long cr3 = vmcs_readl(GUEST_CR3);
+	unsigned long eptp = vmcs_read64(EPT_POINTER);
+	unsigned long eipp, tmp;
+	char num[8];
+	bool host = true;
+	u64 spte;
+	int l;
+
+	/* FIXME: guest ept locks */
+
+	if (vcpu->kvm->arch.pkvm.shadow_vm_handle != PKVM_HOST_HANDLE)
+		host = false;
+
+	/* Translate it from the shadow to report it */
+	tmp = guest_ept_lookup(vcpu, eptp, gpa, &spte, &l);
+	if (host) {
+		if (tmp == ~0)
+			pkvm_err("%s: 0x%lx is no longer in the host\n", __func__,
+				 gpa);
+	} else {
+		if (tmp == ~0)
+			pkvm_err("%s: 0x%lx is no longer in the guest\n", __func__,
+				 gpa);
+	}
+
+	/* Make a linear mapping address of the IP for the hyp use */
+	eipp = guest_virt_to_phys(vcpu, cr3, eip, NULL, NULL);
+	if (vcpu->kvm->arch.pkvm.shadow_vm_handle != PKVM_HOST_HANDLE)
+		eipp = guest_ept_lookup(vcpu, eptp, eipp, &spte, &l);
+	eip = (unsigned long)pkvm_phys_to_virt(eipp);
+
+	pkvm_err("%s: memory access violation by vm 0x%x for 0x%lx/0x%lx at 0x%lx/0x%lx\n",
+		 __func__, vcpu->kvm->arch.pkvm.shadow_vm_handle, gla, gpa, eip, eipp);
+	pkvm_err("%s: CR3 0x%lx		EPT 0x%lx\n", __func__, cr3, eptp);
+
+	if ((eip == ~0) || (eipp == ~0))
+		return;
+
+	sprintf(num, "0x%lx ", eipp);
+
+	/* Show failing instructions */
+	hexdump(num, (char *)eip, 32);
+
+	/* Inject a general protection fault */
+	inject_guest_gpf();
+
+	/* Show host maps */
+	print_host_maps();
+}
+
 int handle_host_ept_violation(struct kvm_vcpu *vcpu, bool *skip_instruction)
 {
 	unsigned long hpa, gpa = vmcs_read64(GUEST_PHYSICAL_ADDRESS);
 	struct mem_range range, cur;
 	bool is_memory = find_mem_range(gpa, &range) || is_pvmfw_memory(gpa);
 	u64 prot = pkvm_mkstate(HOST_EPT_DEF_MMIO_PROT, PKVM_PAGE_OWNED);
-	int level;
+	int level = PG_LEVEL_NONE;
 	int ret;
+	u64 spte;
+
 	*skip_instruction = true;
 
-	if (is_memory) {
+	if (is_memory || pkvm_host_init_complete) {
 		pkvm_err("%s: not handle for memory address 0x%lx\n", __func__, gpa);
 		return -EPERM;
 	}
@@ -377,19 +457,25 @@ int handle_host_ept_violation(struct kvm_vcpu *vcpu, bool *skip_instruction)
 
 	pkvm_spin_lock(&_host_ept_lock);
 
-	pkvm_pgtable_lookup(&host_ept, gpa, &hpa, NULL, &level);
+	// pkvm_pgtable_lookup(&host_ept, gpa, &hpa, NULL, &level);
+	hpa = guest_ept_lookup(vcpu, host_ept.root_pa, gpa, &spte, &level);
 	if (hpa != INVALID_ADDR) {
 		ret = -EAGAIN;
 		goto out;
 	}
 
+	/*
+	 * Before mapping the device in the host, make sure it
+	 * doesn't overlap iommu or ram. If it does, -eperm it.
+	 */
 	do {
 		unsigned long size = ept_level_to_size(level);
 
 		cur.start = ALIGN_DOWN(gpa, size);
 		cur.end = cur.start + size - 1;
 		/*
-		 * TODO:
+		 * FIXME:
+		 * check if this MMIO belongs to pkvm owned devices (e.g. IOMMU)
 		 * check if this MMIO belongs to a secure VM pass-through device.
 		 */
 		if ((1 << level & host_ept.allowed_pgsz) &&
@@ -399,16 +485,20 @@ int handle_host_ept_violation(struct kvm_vcpu *vcpu, bool *skip_instruction)
 		level--;
 	} while (level != PG_LEVEL_NONE);
 
+	pkvm_dbg("%s: gpa 0x%lx, 0x%lx ~ 0x%lx size 0x%lx level %d\n",
+		 __func__, gpa, cur.start, cur.end, cur.end - cur.start + 1,
+		 level);
+
 	if (level == PG_LEVEL_NONE) {
-		pkvm_err("pkvm: No valid range: gpa 0x%lx, cur 0x%lx ~ 0x%lx size 0x%lx level %d\n",
-			 gpa, cur.start, cur.end, cur.end - cur.start + 1, level);
+		pkvm_err("%s: mmio gpa 0x%lx overlaps non mmio regions\n",
+			 __func__, gpa);
 		ret = -EPERM;
 		goto out;
 	}
 
-	pkvm_dbg("pkvm: %s: cur MMIO range 0x%lx ~ 0x%lx size 0x%lx level %d\n",
-		__func__, cur.start, cur.end, cur.end - cur.start + 1, level);
-
+	/*
+	 * Glue it in the host as mmio. FIXME: 0x0
+	 */
 	ret = pkvm_host_ept_map(cur.start, cur.start, cur.end - cur.start + 1,
 			   1 << level, prot);
 	if (ret == -ENOMEM) {
@@ -417,10 +507,14 @@ int handle_host_ept_violation(struct kvm_vcpu *vcpu, bool *skip_instruction)
 			 __func__, gpa);
 	}
 out:
-	pkvm_spin_unlock(&_host_ept_lock);
-
 	if (ret == 0)
 		*skip_instruction = false;
+	if (pkvm_has_vmx_root_mmio() && ret == -EPERM) {
+		handle_permission_violation(vcpu);
+		*skip_instruction = false;
+	}
+	pkvm_spin_unlock(&_host_ept_lock);
+
 	return ret;
 }
 
@@ -969,17 +1063,17 @@ static bool allow_shadow_ept_mapping(struct pkvm_shadow_vm *vm,
 }
 
 static int pkvm_add_shadow_ept_mapping(struct pkvm_shadow_vm *vm,
-                                     u64 fault_gpa, unsigned long phys,
-                                     u64 prot, int level)
+				       u64 fault_gpa, unsigned long phys,
+				       u64 prot, int level)
 {
-      unsigned long level_size = vm->sept_desc.sept.pgt_ops->pgt_level_to_size(level);
-      unsigned long gpa = ALIGN_DOWN(fault_gpa, level_size);
-      unsigned long hpa = ALIGN_DOWN(host_gpa2hpa(phys), level_size);
+	unsigned long level_size = vm->sept_desc.sept.pgt_ops->pgt_level_to_size(level);
+	unsigned long gpa = ALIGN_DOWN(fault_gpa, level_size);
+	unsigned long hpa = ALIGN_DOWN(host_gpa2hpa(phys), level_size);
 
-      if (!allow_shadow_ept_mapping(vm, gpa, hpa, level_size))
-              return -1;
+	if (!allow_shadow_ept_mapping(vm, gpa, hpa, level_size))
+		return -1;
 
-      return pkvm_pgtable_map(&vm->sept_desc.sept, gpa, hpa, level_size, 0, prot, NULL);
+	return pkvm_pgtable_map(&vm->sept_desc.sept, gpa, hpa, level_size, 0, prot, NULL);
 }
 
 enum sept_handle_ret
@@ -1003,9 +1097,12 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 		goto out;
 	}
 
+	/*
+	 * See what the kvm-high has done and if nothing, route back to
+	 * direct_page_fault
+	 */
 	pkvm_pgtable_lookup(vept, l2_gpa, &phys, &gprot, &level);
 	if (phys == INVALID_ADDR)
-		/* Geust EPT not valid, back to kvm-high */
 		goto out;
 
 	rsvd_chk_gprot = gprot;
@@ -1013,6 +1110,11 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 	if (level != PG_LEVEL_4K)
 		pgt_ops->pgt_entry_mkhuge(&rsvd_chk_gprot);
 
+	/*
+	 * Regular emulated MMIO is injected back as misconfiguration via
+	 * the rsvd bits being set. We will attempt to emulate these pages
+	 * by using the emulate.c.
+	 */
 	if (is_rsvd_spte(&ept_zero_check, rsvd_chk_gprot, level)) {
 		ret = PKVM_INJECT_EPT_MISC;
 		goto out;
@@ -1028,9 +1130,14 @@ pkvm_handle_shadow_ept_violation(struct shadow_vcpu_state *shadow_vcpu, u64 l2_g
 	 * vmexit.
 	 */
 	prot = (gprot & EPT_PROT_MASK) | EPT_PROT_DEF;
-	if (!pkvm_add_shadow_ept_mapping(vm, l2_gpa, phys, prot, level)) {
+
+	/* If this is to be fixed RO */
+	if (is_guest_ro(l2_gpa, KVM_HPAGE_SIZE(level)))
+		prot &= ~0x2;
+
+	if (!pkvm_add_shadow_ept_mapping(vm, l2_gpa, phys, prot, level))
 		ret = PKVM_HANDLED;
-	}
+
 out:
 	pkvm_spin_unlock(&vm->lock);
 	return ret;

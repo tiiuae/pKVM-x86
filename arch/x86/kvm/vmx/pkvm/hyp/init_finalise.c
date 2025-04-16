@@ -8,6 +8,7 @@
 #include <mmu/spte.h>
 #include <asm/kvm_pkvm.h>
 #include <asm/pci_x86.h>
+#include <vmx/vmx_debug.h>
 
 #include <pkvm.h>
 #include <capabilities.h>
@@ -32,11 +33,15 @@ bool pvmfw_present;
 phys_addr_t pvmfw_base;
 phys_addr_t pvmfw_size;
 
+u64 host_eptp = 0;
+
 void *pkvm_mmu_pgt_base;
 void *pkvm_vmemmap_base;
 void *host_ept_pgt_base;
 static void *iommu_mem_base;
 static void *shadow_ept_base;
+DEFINE_SPINLOCK(pkvm_init_lock);
+static struct kvm *host_kvm;
 
 static int divide_memory_pool(phys_addr_t phys, unsigned long size)
 {
@@ -235,6 +240,9 @@ static int create_host_ept_mapping(void)
 	entry_prot = pkvm_mkstate(HOST_EPT_DEF_MMIO_PROT, PKVM_PAGE_OWNED);
 	for (i = 0; i < hyp_memblock_nr; i++, phys = reg->base + reg->size) {
 		reg = &hyp_memory[i];
+		if (!phys)
+			continue;
+
 		ret = pkvm_host_ept_map(phys, phys, (unsigned long)reg->base - phys,
 				  0, entry_prot);
 		if (ret)
@@ -291,22 +299,110 @@ static int create_iommu(void)
 	return pkvm_init_iommu(pkvm_virt_to_phys(iommu_mem_base), nr_pages);
 }
 
+static int create_host_vm(struct kvm_vcpu *vcpu)
+{
+	struct kvm_memslots *slots;
+	struct memblock_region *reg;
+	struct kvm_memory_slot *new = NULL;
+	int ret = 0, i, j;
+
+	host_kvm = vcpu->kvm = __vmalloc(sizeof(struct kvm_vmx),
+					 GFP_KERNEL_ACCOUNT | __GFP_ZERO);
+	if (!host_kvm) {
+		ret = -ENOMEM;
+		goto out;
+	}
+
+	/* Mark as host kvm */
+	host_kvm->arch.pkvm.shadow_vm_handle = PKVM_HOST_HANDLE;
+
+	/* Initialize the memslot construction */
+	refcount_set(&host_kvm->users_count, 1);
+	mutex_init(&host_kvm->slots_lock);
+	spin_lock_init(&host_kvm->mn_invalidate_lock);
+	if (init_srcu_struct(&host_kvm->srcu)) {
+		ret = -EFAULT;
+		goto out;
+	}
+	if (init_srcu_struct(&host_kvm->irq_srcu)) {
+		ret = -EFAULT;
+		goto out;
+	}
+	rcuwait_init(&host_kvm->mn_memslots_update_rcuwait);
+
+	for (i = 0; i < kvm_arch_nr_memslot_as_ids(kvm); i++) {
+		for (j = 0; j < 2; j++) {
+			slots = &host_kvm->__memslots[i][j];
+
+			atomic_long_set(&slots->last_used_slot, (unsigned long)NULL);
+			slots->hva_tree = RB_ROOT_CACHED;
+			slots->gfn_tree = RB_ROOT;
+			hash_init(slots->id_hash);
+			slots->node_idx = j;
+			slots->generation = i; /*yes, must be different */
+		}
+	}
+
+	/* the default active set = 0 */
+	rcu_assign_pointer(host_kvm->memslots[0], &host_kvm->__memslots[0][0]);
+	rcu_assign_pointer(host_kvm->memslots[1], &host_kvm->__memslots[0][1]);
+	kvm_info("pkvm: memslots 0x%llx (A), 0x%llx (I)",
+		 (u64)host_kvm->memslots[0], (u64)host_kvm->memslots[1]);
+
+	/* Set them up */
+	for (i = 0; i < hyp_memblock_nr; i++) {
+		reg = &hyp_memory[i];
+		new = kzalloc(sizeof(*new), GFP_KERNEL_ACCOUNT);
+		if (!new) {
+			ret = -ENOMEM;
+			goto out;
+		}
+		new->as_id = 0;
+		new->id = i + 1;
+		new->base_gfn = reg->base;
+		new->base_gfn = new->base_gfn >> PAGE_SHIFT;
+		new->userspace_addr = (u64)pkvm_phys_to_virt(reg->base);
+
+		if (!(reg->size % PAGE_SIZE))
+			new->npages = reg->size / PAGE_SIZE;
+		else
+			new->npages = (reg->size / PAGE_SIZE) + 1;
+
+		ret = kvm_arch_prepare_memory_region(host_kvm, NULL, new, KVM_MR_CREATE);
+		if (ret)
+			goto out;
+
+		kvm_create_memslot(host_kvm, new);
+		pkvm_info("pkvm: host memslot GFN 0x%llx ADDR 0x%lx sz %lu",
+			  new->base_gfn, new->userspace_addr,
+			  new->npages * PAGE_SIZE);
+        }
+out:
+	if (ret && new)
+		kfree(new);
+
+	return ret;
+}
+
 #define TMP_SECTION_SZ	16UL
 int __pkvm_init_finalise(struct kvm_vcpu *vcpu, struct pkvm_section sections[],
 			 int section_sz)
 {
 	int i, ret = 0;
+
 	static bool pkvm_init;
 	struct pkvm_host_vcpu *pkvm_host_vcpu = to_pkvm_hvcpu(vcpu);
 	struct pkvm_pcpu *pcpu = pkvm_host_vcpu->pcpu;
 	struct pkvm_section tmp_sections[TMP_SECTION_SZ];
 	phys_addr_t hyp_mem_base;
 	unsigned long hyp_mem_size = 0;
-	u64 eptp;
 
+	spin_lock(&pkvm_init_lock);
 	if (pkvm_init) {
 		/* Switch to pkvm mmu in root mode in case some setup may need this */
 		native_write_cr3(pkvm_hyp->mmu->root_pa);
+		vcpu->kvm = host_kvm;
+
 		goto switch_pgt;
 	}
 
@@ -325,6 +421,9 @@ int __pkvm_init_finalise(struct kvm_vcpu *vcpu, struct pkvm_section sections[],
 		if (sections[i].type == PKVM_RESERVED_MEMORY) {
 			hyp_mem_base = sections[i].addr;
 			hyp_mem_size = sections[i].size;
+			pkvm_info("pkvm: section 0x%llx size %lu\n",
+				  hyp_mem_base, hyp_mem_size);
+
 		}
 	}
 	if (hyp_mem_size == 0) {
@@ -346,6 +445,12 @@ int __pkvm_init_finalise(struct kvm_vcpu *vcpu, struct pkvm_section sections[],
 	ret = create_host_ept_mapping();
 	if (ret)
 		goto out;
+
+	ret = create_host_vm(vcpu);
+	if (ret) {
+		pkvm_err("pkvm: unable to create host vm");
+		goto out;
+	}
 
 	ret = protect_pkvm_pages(tmp_sections, section_sz,
 			hyp_mem_base, hyp_mem_size);
@@ -377,9 +482,10 @@ switch_pgt:
 	pcpu->cr3 = pkvm_hyp->mmu->root_pa;
 
 	/* enable ept */
-	eptp = pkvm_construct_eptp(pkvm_hyp->host_vm.ept->root_pa, pkvm_hyp->host_vm.ept->level);
+	host_eptp = pkvm_construct_eptp(pkvm_hyp->host_vm.ept->root_pa,
+			pkvm_hyp->host_vm.ept->level);
 	secondary_exec_controls_setbit(&pkvm_host_vcpu->vmx, SECONDARY_EXEC_ENABLE_EPT);
-	vmcs_write64(EPT_POINTER, eptp);
+	vmcs_write64(EPT_POINTER, host_eptp);
 
 	/* enable vpid */
 	if (pkvm_hyp->vmcs_config.cpu_based_2nd_exec_ctrl & SECONDARY_EXEC_ENABLE_VPID &&
@@ -401,6 +507,15 @@ switch_pgt:
 	ept_sync_global();
 
 	ret = pkvm_setup_lapic(pcpu, vcpu->cpu);
+	barrier();
+
+	pkvm_info("Protected host configuration complete on cpu with info:\n");
+	pkvm_info("%s", debug_dump_vmcs());
+	print_guest_maps(vcpu, d_s);
+
 out:
+	barrier();
+	spin_unlock(&pkvm_init_lock);
+
 	return ret;
 }

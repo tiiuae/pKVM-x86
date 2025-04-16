@@ -133,9 +133,34 @@ config PKVM_INTEL
 
 	  If unsure, say N.
 
+choice
+	prompt "pKVM MMIO handler type"
+	default PKVM_INTEL_VE_MMIO
+	depends on PKVM_INTEL
+
+config PKVM_INTEL_VE_MMIO
+	bool "pKVM Intel #VE based guest MMIO"
+
+	help
+	  Use #VE to trap MMIO accesses to the guest. The #VE handler on
+	  the guest then issues a hypercall that is routed to the VMM.
+
+config PKVM_INTEL_VMXROOT_MMIO
+	bool "pKVM Intel VMX root mode guest MMIO emulation"
+	depends on TRANSPARENT_HUGEPAGE
+	help
+	  Use the VMX root mode for MMIO emulation.
+
+	  Allows the protected VMs to work with any guest, any bios on
+	  any hardware as the MMIO emulation is implemented by the pKVM
+	  in the vmxroot mode.
+
+	  Use this if you trust the hypervisor code, otherwise say no.
+endchoice
+
 config PKVM_INTEL_VE_EMULATION
 	bool "pKVM Intel #VE emulation support"
-	depends on PKVM_INTEL
+	depends on PKVM_INTEL_VE_MMIO
 	default n
 	help
 	  Emulate virtualization exceptions for VCPUs that do not have the

@@ -339,10 +339,10 @@ static int pgtable_unmap_cb(struct pkvm_pgtable *pgt, unsigned long vaddr,
 		if (data->unmap_leaf_override) {
 			vaddr = ALIGN_DOWN(vaddr, pgt_ops->pgt_level_to_size(level));
 			return data->unmap_leaf_override(pgt, vaddr, level, ptep,
-					flush_data, data);
+							 flush_data, data);
 		} else
 			return pgtable_unmap_leaf(pgt, vaddr, level, ptep,
-					flush_data, data);
+						  flush_data, data);
 	}
 
 	if (pgt_ops->pgt_entry_huge(ptep)) {
@@ -582,9 +582,9 @@ int pkvm_pgtable_init(struct pkvm_pgtable *pgt,
 }
 
 static int __pkvm_pgtable_map(struct pkvm_pgtable *pgt, unsigned long vaddr_start,
-		     unsigned long phys, unsigned long size,
-		     int pgsz_mask, u64 prot, pgtable_leaf_ov_fn_t map_leaf,
-		     u64 annotation)
+			      unsigned long phys, unsigned long size,
+			      int pgsz_mask, u64 prot, pgtable_leaf_ov_fn_t map_leaf,
+			      u64 annotation)
 {
 	struct pkvm_pgtable_map_data data = {
 		.phys = phys,

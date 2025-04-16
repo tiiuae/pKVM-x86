@@ -10,6 +10,8 @@
 #include <asm/coco.h>
 #include <asm/virt_exception.h>
 
+#define PKVM_HOST_HANDLE	INT_MAX
+
 /* PKVM Hypercalls */
 #define PKVM_HC_INIT_FINALISE		1
 #define PKVM_HC_INIT_SHADOW_VM		2
@@ -22,6 +24,8 @@
 #define PKVM_HC_TLB_REMOTE_FLUSH_RANGE	9
 #define PKVM_HC_SET_MMIO_VE		10
 #define PKVM_HC_ADD_PTDEV		11
+#define PKVM_HC_EMULATE_INSN				12
+#define PKVM_HC_INJECT_EVENTS				13
 #define PKVM_HC_PREPARE_VM_COREDUMP	14
 
 /*
