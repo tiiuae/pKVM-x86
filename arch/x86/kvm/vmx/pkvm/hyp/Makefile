@@ -11,6 +11,7 @@ pkvm-hyp-y	:= vmx_asm.o vmexit.o memory.o page_alloc.o early_alloc.o pgtable.o m
 		   iommu.o iommu_debug.o ptdev.o iommu_spgt.o io_emulate.o pci.o trace.o
 
 pkvm-hyp-$(CONFIG_PKVM_INTEL_VE_EMULATION)		+= ve_emulation.o
+pkvm-hyp-$(CONFIG_PKVM_INTEL_PROTECTED_VM_COREDUMP)	+= coredump.o
 
 ifndef CONFIG_PKVM_INTEL_DEBUG
 lib-dir		:= lib

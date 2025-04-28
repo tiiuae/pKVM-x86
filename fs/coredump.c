@@ -47,6 +47,7 @@
 #include <asm/mmu_context.h>
 #include <asm/tlb.h>
 #include <asm/exec.h>
+#include <asm/pkvm.h>
 
 #include <trace/events/task.h>
 #include "internal.h"
@@ -545,6 +546,7 @@ void do_coredump(const kernel_siginfo_t *siginfo)
 		.cpu = raw_smp_processor_id(),
 	};
 
+	pkvm_prepare_coredump();
 	audit_core_dumps(siginfo->si_signo);
 
 	binfmt = mm->binfmt;

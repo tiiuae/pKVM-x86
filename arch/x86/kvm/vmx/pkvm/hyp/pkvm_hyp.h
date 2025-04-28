@@ -151,6 +151,9 @@ struct pkvm_shadow_vm {
 	/* link the passthrough devices of a protected VM */
 	struct list_head ptdev_head;
 
+	/* Our process context */
+	struct mm_struct *mm;
+
 	/* The vm_type to indicate if this is a protected VM */
 	unsigned long vm_type;
 
@@ -169,6 +172,7 @@ int __pkvm_init_shadow_vm(struct kvm_vcpu *hvcpu, unsigned long kvm_va,
 			  unsigned long shadow_pa,  size_t shadow_size);
 unsigned long __pkvm_teardown_shadow_vm(int shadow_vm_handle);
 struct pkvm_shadow_vm *get_shadow_vm(int shadow_vm_handle);
+struct pkvm_shadow_vm *get_shadow_vm_by_mm(struct mm_struct *);
 void put_shadow_vm(int shadow_vm_handle);
 void pkvm_shadow_vm_link_ptdev(struct pkvm_shadow_vm *vm,
 			       struct list_head *node, bool coherency);
