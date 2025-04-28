@@ -12385,6 +12385,14 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	int ret;
 	unsigned long flags;
 
+#ifdef CONFIG_PKVM_INTEL_FORCE_PROTECTED_VM
+	/* FIXME: instead of changing the type i.e. always pretending to have
+	 * a protected VM, we should have `kvm_x86_is_vm_type_supported()`
+	 * return false if the type is not KVM_X86_PROTECTED_VM. That is,
+	 * force VMM to be prepared to serve a protected VM.
+	 */
+	type = KVM_X86_PROTECTED_VM;
+#endif
 	if (!static_call(kvm_x86_is_vm_type_supported)(type))
 		return -EINVAL;
 
