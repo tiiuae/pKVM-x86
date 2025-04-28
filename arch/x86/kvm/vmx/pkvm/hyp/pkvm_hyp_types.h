@@ -148,6 +148,9 @@ struct pkvm_shadow_vm {
 	/* link the passthrough devices of a protected VM */
 	struct list_head ptdev_head;
 
+	/* Our process context */
+	struct mm_struct *mm;
+
 	/*
 	 * Address where the pvmfw is loaded in a protected VM memory
 	 * or PVMFW_INVALID_LOAD_ADDR if the VM is running without pvmfw

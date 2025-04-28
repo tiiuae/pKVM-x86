@@ -22,6 +22,7 @@
 #define PKVM_HC_TLB_REMOTE_FLUSH_RANGE	9
 #define PKVM_HC_SET_MMIO_VE		10
 #define PKVM_HC_ADD_PTDEV		11
+#define PKVM_HC_PREPARE_VM_COREDUMP	14
 
 /*
  * 15bits for PASID, DO NOT change it, based on it,
@@ -140,6 +141,13 @@ static inline void pkvm_update_iommu_virtual_caps(u64 *cap, u64 *ecap)
 		*ecap &= ~(1UL << 2);
 	}
 }
+
+static inline void pkvm_prepare_coredump(void)
+{
+	kvm_hypercall1(PKVM_HC_PREPARE_VM_COREDUMP, (u64)current->mm);
+}
+#else
+static inline void pkvm_prepare_coredump(void) { };
 #endif
 
 #ifdef CONFIG_PKVM_GUEST

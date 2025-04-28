@@ -17,6 +17,7 @@
 #include "io_emulate.h"
 #include "debug.h"
 #include "init_finalise.h"
+#include "coredump.h"
 
 #define CR4	4
 
@@ -128,6 +129,9 @@ static unsigned long handle_vmcall(struct kvm_vcpu *vcpu)
 		break;
 	case PKVM_HC_ADD_PTDEV:
 		ret = pkvm_add_ptdev(a0, a1, a2);
+		break;
+	case PKVM_HC_PREPARE_VM_COREDUMP:
+		ret = pkvm_prepare_vm_coredump((struct mm_struct *)a0);
 		break;
 	default:
 		ret = -EINVAL;

@@ -252,6 +252,22 @@ struct pkvm_shadow_vm *get_shadow_vm(int shadow_vm_handle)
 	return atomic_inc_not_zero(&vm_ref->refcount) ? vm_ref->vm : NULL;
 }
 
+struct pkvm_shadow_vm *get_shadow_vm_by_mm(struct mm_struct *mm)
+{
+       struct shadow_vm_ref *vm_ref = NULL;
+       u32 i = 0;
+
+       while (i < MAX_SHADOW_VMS) {
+               vm_ref = &shadow_vms_ref[i];
+               if (vm_ref && vm_ref->vm && vm_ref->vm->mm == mm)
+                       break;
+               i++;
+       }
+       if (i < (MAX_SHADOW_VMS - 1))
+               return atomic_inc_not_zero(&vm_ref->refcount) ? vm_ref->vm : NULL;
+       return NULL;
+}
+
 void put_shadow_vm(int shadow_vm_handle)
 {
 	struct shadow_vm_ref *vm_ref;
