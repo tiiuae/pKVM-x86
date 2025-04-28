@@ -918,6 +918,18 @@ config PKVM_GUEST
 	  Without this support, the guest kernel can not boot or run
 	  under Protected KVM.
 
+config PKVM_GUEST_FORCE_VRING_DMA_API
+	bool "Force pKVM guest to use DMA API"
+	depends on PKVM_GUEST
+	default n
+	help
+	  Normally the device would set VIRTIO_F_ACCESS_PLATFORM feature if
+	  the host is unable to access guest's memory. If the device
+	  does not support the feature, enabling this option forces the
+	  protected VM to allocate the vrings using the DMA API.
+
+	  If unsure, say N.
+
 endif # HYPERVISOR_GUEST
 
 source "arch/x86/Kconfig.cpu"

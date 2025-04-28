@@ -14,6 +14,7 @@
 #include <linux/kmsan.h>
 #include <linux/spinlock.h>
 #include <xen/xen.h>
+#include <asm/pkvm.h>
 
 #ifdef DEBUG
 /* For development, we want to crash whenever the ring is screwed. */
@@ -292,6 +293,10 @@ static bool vring_use_dma_api(const struct virtio_device *vdev)
 	 * all of the sensible Xen configurations to work correctly.
 	 */
 	if (xen_domain())
+		return true;
+
+	if (IS_ENABLED(PKVM_GUEST_FORCE_VRING_DMA_API) &&
+	    pkvm_is_protected_guest())
 		return true;
 
 	return false;
