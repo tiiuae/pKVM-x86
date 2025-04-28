@@ -12768,6 +12768,10 @@ int kvm_arch_init_vm(struct kvm *kvm, unsigned long type)
 	int ret;
 	unsigned long flags;
 
+#ifdef CONFIG_PKVM_INTEL_FORCE_PROTECTED_VM
+	/* HACK: for now always pretend to have a protected VM. */
+	type = KVM_X86_PKVM_PROTECTED_VM;
+#endif
 	if (!kvm_is_vm_type_supported(type))
 		return -EINVAL;
 

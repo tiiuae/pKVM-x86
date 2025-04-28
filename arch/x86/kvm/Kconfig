@@ -154,6 +154,15 @@ config PKVM_INTEL_DEBUG
 
           If unsure, say N.
 
+config PKVM_INTEL_FORCE_PROTECTED_VM
+	bool "Support only protected VMs"
+	depends on PKVM_INTEL
+	default y
+	help
+	  Force all pKVM VMs to be protected.
+
+	  If unsure, say Y.
+
 config X86_SGX_KVM
 	bool "Software Guard eXtensions (SGX) Virtualization"
 	depends on X86_SGX && KVM_INTEL

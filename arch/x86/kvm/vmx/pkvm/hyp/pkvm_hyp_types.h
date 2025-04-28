@@ -21,8 +21,13 @@ struct shadow_ept_desc {
 	struct pkvm_pgtable sept;
 };
 
+#ifdef CONFIG_PKVM_INTEL_FORCE_PROTECTED_VM
+#define PKVM_MAX_NORMAL_VM_NUM		0
+#define PKVM_MAX_PROTECTED_VM_NUM	10
+#else
 #define PKVM_MAX_NORMAL_VM_NUM		8
 #define PKVM_MAX_PROTECTED_VM_NUM	2
+#endif
 
 /*
  * Store the Virtualization Exception(#VE) information when a #VE occurs. This
