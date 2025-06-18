@@ -1432,7 +1432,7 @@ int pkvm_add_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
 	if (!vm || !size)
 		return -EINVAL;
 
-	while (i <= PKVM_MAX_SHARES) {
+	while (i < PKVM_MAX_SHARES) {
 		if (vm->shares[i].size == 0) {
 			vm->shares[i].gpa = gpa;
 			vm->shares[i].size = size;
@@ -1451,7 +1451,7 @@ int pkvm_del_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
 	if (!vm || !size)
 		return -EINVAL;
 
-	while (i <= PKVM_MAX_SHARES) {
+	while (i < PKVM_MAX_SHARES) {
 		s = vm->shares[i].gpa ;
 		e = s + vm->shares[i].size;
 		if ((gpa >= s) && (gpa + size < e)) {
@@ -1472,7 +1472,7 @@ int pkvm_is_share(struct pkvm_shadow_vm *vm, u64 gpa, int size)
 	if (!vm || !size)
 		return 0;
 
-	while (i <= PKVM_MAX_SHARES) {
+	while (i < PKVM_MAX_SHARES) {
 		s = vm->shares[i].gpa;
 		e = s + vm->shares[i].size;
 		if ((gpa >= s) && ((gpa + size) < e))
