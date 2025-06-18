@@ -3,6 +3,7 @@
  * Copyright (C) 2022 Intel Corporation
  */
 
+#include <linux/kconfig.h>
 #include <pkvm.h>
 #include <asm/kvm_pkvm.h>
 #include <capabilities.h>
@@ -1516,17 +1517,22 @@ static bool nested_handle_vmcall(struct kvm_vcpu *vcpu)
 	switch (nr) {
 	case PKVM_GHC_SHARE_MEM:
 		ret = __pkvm_guest_share_host(pgstate_pgt, a0, a1);
-		/* FIXME: FLAG VMXROOT */
-		if (!ret)
-			ret = pkvm_add_share(shadow_vcpu->vm, a0, a1);
+
+		if (IS_ENABLED(CONFIG_PKVM_INTEL_VMXROOT_MMIO)) {
+			if (!ret)
+				ret = pkvm_add_share(shadow_vcpu->vm, a0, a1);
+		}
 
 		handled = true;
 		break;
 	case PKVM_GHC_UNSHARE_MEM:
 		ret = __pkvm_guest_unshare_host(pgstate_pgt, a0, a1);
-		/* FIXME: FLAG VMXROOT */
-		if (!ret)
-			ret = pkvm_del_share(shadow_vcpu->vm, a0, a1);
+
+		if (IS_ENABLED(CONFIG_PKVM_INTEL_VMXROOT_MMIO)) {
+			if (!ret)
+				ret = pkvm_del_share(shadow_vcpu->vm, a0, a1);
+		}
+
 		handled = true;
 		break;
 	case PKVM_GHC_GET_VE_INFO:
