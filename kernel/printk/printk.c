@@ -531,8 +531,12 @@ static u32 log_buf_len = __LOG_BUF_LEN;
 /* Tiny ram log */
 #ifdef CONFIG_DEBUG_KERNEL
 #include <linux/ramlog.h>
+
 char __rlog[RAMLOGSZ];
+EXPORT_SYMBOL(__rlog);
+
 int __rp = 0;
+EXPORT_SYMBOL(__rp);
 #endif
 
 /*
