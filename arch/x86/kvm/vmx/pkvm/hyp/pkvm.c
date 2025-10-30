@@ -409,6 +409,8 @@ static s64 attach_shadow_vcpu_to_vm(struct pkvm_shadow_vm *vm,
 
 	if (vm->created_vcpus == KVM_MAX_VCPUS) {
 		pkvm_spin_unlock(&vm->lock);
+		put_shadow_vm(vm->shadow_vm_handle);
+
 		return -EINVAL;
 	}
 
