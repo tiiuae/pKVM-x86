@@ -417,24 +417,29 @@ static __maybe_unused int print_guest_maps_by_handle(int shadow_vm_handle)
 	struct pkvm_shadow_vm *vm = get_shadow_vm(shadow_vm_handle);
 	struct shadow_vcpu_ref *vcpu_ref;
 	int m1, m2, m3;
+	int ret = 0;
 
 	if (!vm) {
 		pkvm_err("No such vm 0x%x\n", shadow_vm_handle);
 		return -ENOENT;
 	}
+
 	vcpu_ref = &SHADOW_VCPU_ARRAY(vm)->ref[0];
 	if (!vcpu_ref || !vcpu_ref->vcpu) {
 		pkvm_err("VM has no attached vcpus\n");
-		return -EINVAL;
+		ret = -EINVAL;
+		goto out;
 	}
+
 	m1 = print_guest_maps(vcpu_ref->vcpu->gvcpu, d_s);
 	m2 = print_guest_maps(vcpu_ref->vcpu->gvcpu, d_k);
 	m3 = print_guest_maps(vcpu_ref->vcpu->gvcpu, d_p);
 	pr_info("Total %d shadow, %d kvm and %d pgstate mappings\n", m1, m2, m3);
 
+out:
 	put_shadow_vm(vm->shadow_vm_handle);
 
-	return 0;
+	return ret;
 }
 
 int print_host_maps(void)
