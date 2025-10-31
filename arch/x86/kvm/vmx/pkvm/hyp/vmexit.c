@@ -112,6 +112,8 @@ static int pkvm_emulate_instruction(struct kvm_vcpu *vcpu, gpa_t cr2_or_gpa,
 	vmcs_load(pkvm_phys_to_virt(vmptr));
 	barrier();
 
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
 	return ret;
 }
 
@@ -134,6 +136,8 @@ static int pkvm_inject_events(struct kvm_vcpu *vcpu,
 
 	vmcs_load(pkvm_phys_to_virt(vmptr));
 	barrier();
+
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
 
 	return ret;
 }
