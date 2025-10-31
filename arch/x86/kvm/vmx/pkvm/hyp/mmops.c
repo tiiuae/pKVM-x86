@@ -198,12 +198,16 @@ out:
 unsigned long pkvm_user_to_phys(struct kvm_vcpu *vcpu, unsigned long vaddr)
 {
 	struct shadow_vcpu_state *shadow_vcpu;
+	unsigned long phys;
 
 	shadow_vcpu = get_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
 	if (!shadow_vcpu)
 		BUG();
+	phys = guest_virt_to_phys(vcpu, shadow_vcpu->vm->mm->pgd->pgd, vaddr, NULL, NULL);
 
-	return guest_virt_to_phys(vcpu, shadow_vcpu->vm->mm->pgd->pgd, vaddr, NULL, NULL);
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
+	return phys;
 }
 
 int __get_user_hyp64(struct kvm_vcpu *vcpu, u64 *ret, u64 *vaddr)
@@ -223,6 +227,9 @@ int __get_user_hyp64(struct kvm_vcpu *vcpu, u64 *ret, u64 *vaddr)
 	__hyp_write_cr3(pkvm_hyp->mmu->root_pa);
 
 	*ret = val;
+
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
 	return 0;
 }
 
@@ -276,6 +283,8 @@ int __hyp_read_guest_page(struct kvm_vcpu *vcpu, struct kvm_memory_slot *slot,
 	asm volatile("clac" ::: "memory");
 	__hyp_write_cr3(pkvm_hyp->mmu->root_pa);
 
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
 	return 0;
 }
 
@@ -308,23 +317,11 @@ int __hyp_vcpu_write_guest_page(struct kvm_vcpu *vcpu,
 	__hyp_write_cr3(pkvm_hyp->mmu->root_pa);
 
 	mark_page_dirty_in_slot(vcpu->kvm, slot, gfn);
+
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
 	return 0;
 }
-
-struct x86_emulate_ctxt *get_emulate_ctxt(struct kvm_vcpu *vcpu)
-{
-	struct shadow_vcpu_state *shadow_vcpu;
-
-	shadow_vcpu = get_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
-	return &shadow_vcpu->ctxt;
-}
-#else
-
-struct x86_emulate_ctxt *get_emulate_ctxt(struct kvm_vcpu *vcpu)
-{
-	return vcpu->arch.emulate_ctxt;
-}
-
 #endif
 
 /* KISS, minimal dependencies version of the EPT walk */
@@ -403,6 +400,9 @@ unsigned long guest_pgt_lookup(struct kvm_vcpu *vcpu, unsigned long vaddr)
 	sept = &desc->sept;
 
 	pkvm_pgtable_lookup(sept, vaddr, &phys, &gprot, &level);
+
+	put_shadow_vcpu(vcpu->pkvm_shadow_vcpu_handle);
+
 	return phys;
 }
 
